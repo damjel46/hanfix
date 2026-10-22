@@ -1,0 +1,103 @@
+#!/usr/bin/make -f
+# ─────────────────────────────────────────────────────────────────────────────
+# UNIM Debian Package Build Rules
+# Uses the project Makefile for build and install
+# ─────────────────────────────────────────────────────────────────────────────
+
+export DH_VERBOSE = 1
+export LC_ALL = C.UTF-8
+
+# Multi-arch support
+export DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
+
+# Rust toolchain — prefer rustup if available, fall back to system cargo
+REAL_HOME := $(shell getent passwd $$(id -u) | cut -d: -f6)
+CARGO_BIN := $(REAL_HOME)/.cargo/bin
+ifneq ($(wildcard $(CARGO_BIN)/cargo),)
+    export RUSTUP_TOOLCHAIN = stable
+endif
+
+# Clean PATH: Remove Anaconda/Conda to ensure system Qt is used
+CLEAN_PATH := $(shell echo "$$PATH" | tr ':' '\n' | grep -v -E '(anaconda|conda|miniconda)' | tr '\n' ':' | sed 's/:$$//')
+export PATH := $(CARGO_BIN):$(CLEAN_PATH)
+
+# Ensure system libraries are used (not Anaconda)
+unexport LD_LIBRARY_PATH
+unexport LIBRARY_PATH
+unexport CPATH
+unexport C_INCLUDE_PATH
+unexport CPLUS_INCLUDE_PATH
+unexport CMAKE_PREFIX_PATH
+unexport QT_PLUGIN_PATH
+unexport CONDA_PREFIX
+unexport CONDA_DEFAULT_ENV
+
+# Makefile variables for Debian packaging
+PREFIX ?= /usr
+DESTDIR ?= $(CURDIR)/debian/tmp
+
+%:
+	dh $@
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Build
+# ─────────────────────────────────────────────────────────────────────────────
+
+override_dh_auto_build:
+	# `cargo`/`rustc` are intentionally NOT in Build-Depends: this project
+	# expects a rustup-managed toolchain (~/.cargo/bin or any PATH cargo),
+	# which dpkg-checkbuilddeps cannot see (apt-only). Cargo.lock v4 still
+	# requires Rust 1.78+ — verified at runtime here.
+	@cargo_ver=$$(cargo --version 2>/dev/null | awk '{print $$2}'); \
+	 if [ -z "$$cargo_ver" ]; then \
+	   echo "❌ cargo not found on PATH ($$PATH)"; exit 1; \
+	 fi; \
+	 major=$$(echo $$cargo_ver | cut -d. -f1); \
+	 minor=$$(echo $$cargo_ver | cut -d. -f2); \
+	 if [ $$major -lt 1 ] || { [ $$major -eq 1 ] && [ $$minor -lt 78 ]; }; then \
+	   echo "❌ cargo $$cargo_ver < 1.78 (Cargo.lock v4 requires 1.78+)"; \
+	   echo "   Install rustup stable: rustup default stable"; exit 1; \
+	 fi; \
+	 echo "✅ cargo $$cargo_ver"
+	$(MAKE) build
+	$(MAKE) gnome-extension
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Install
+# ─────────────────────────────────────────────────────────────────────────────
+
+override_dh_auto_install:
+	$(MAKE) install DESTDIR=$(DESTDIR) PREFIX=$(PREFIX)
+	# Strip residual RUNPATH entries from .so files (CMake INSTALL_RPATH "" should
+	# already handle this; chrpath -d acts as a defence in depth so the package
+	# stays lintian-clean even if upstream CMake macros re-introduce build-tree
+	# RPATH entries).
+	find $(DESTDIR) -type f -name '*.so' -exec chrpath -d {} + 2>/dev/null || true
+	find $(DESTDIR) -type f -name '*.so.*' -exec chrpath -d {} + 2>/dev/null || true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Strip — 자동 dbgsym 패키지를 만들지 않는다
+# ─────────────────────────────────────────────────────────────────────────────
+# 디버그 패키지는 게시하지 않는 것이 정책이다 (rpm 의
+# `%global debug_package %{nil}` 과 동일). Ubuntu 는 dbgsym 을 .ddeb 로 내서
+# `debs/*.deb` 글롭에 안 걸리지만, **Debian 은 .deb 로 낸다** — debian:13
+# 컨테이너 빌드에서 .deb 가 11개가 아니라 20개가 나와 개수 게이트가 잡았다
+# (2026-08-24). 여기서 끄면 두 배포판 모두에서 산출물이 11개로 같아진다.
+override_dh_strip:
+	dh_strip --no-automatic-dbgsym
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Skip tests (speed up packaging)
+# ─────────────────────────────────────────────────────────────────────────────
+
+override_dh_auto_test:
+	:
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Clean
+# ─────────────────────────────────────────────────────────────────────────────
+
+override_dh_auto_clean:
+	# `make clean` only — `clean-all` chains `clean-deb` which rm's ../*.deb in
+	# the parent directory, an unsafe blast radius for dpkg-buildpackage.
+	$(MAKE) clean || true

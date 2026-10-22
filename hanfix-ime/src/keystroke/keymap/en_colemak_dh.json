@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "language": "english",
+  "name": "colemak_dh",
+  "type": "colemak_dh",
+  "metadata": {
+    "display_name": "Colemak-DH",
+    "author": "Stevep99 (2020) · based on Shai Coleman's Colemak",
+    "description": "Colemak에서 D·H 키를 좀 더 편한 위치로 옮겨 검지 부담을 줄인 변형. 2020년 발표.",
+    "version": "1.0",
+    "tags": ["english", "alt", "colemak-family"]
+  },
+  "layout": {
+    "upper": {
+      "1st": ["~","!","@","#","$","%","^","&","*","(",")","_","+","|"],
+      "2nd": ["Q","W","F","P","B","J","L","U","Y",":","{","}"],
+      "3rd": ["A","R","S","T","G","M","N","E","I","O","\""],
+      "4th": ["Z","X","C","D","V","K","H","<",">","?"]
+    },
+    "lower": {
+      "1st": ["`","1","2","3","4","5","6","7","8","9","0","-","=","\\"],
+      "2nd": ["q","w","f","p","b","j","l","u","y",";","[","]"],
+      "3rd": ["a","r","s","t","g","m","n","e","i","o","'"],
+      "4th": ["z","x","c","d","v","k","h",",",".","/"]
+    }
+  }
+}

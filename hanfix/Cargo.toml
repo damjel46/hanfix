@@ -1,0 +1,19 @@
+[package]
+name = "hanfix"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+windows = { version = "0.62.2", optional = true, features = ["Win32_UI_Accessibility", "Win32_System_Com", "Win32_Foundation", "Win32_System_Variant", "Win32_System_Ole"] }
+windows-sys = { version = "0.61.2", optional = true, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_Ime", "Win32_UI_Input", "Win32_System_Threading", "Win32_Security", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_Graphics_Gdi", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Console"] }
+
+[features]
+# The keyboard-hook app (hanfix.exe). The engine (classifier, dubeolsik, lexicon) needs none of it,
+# so hanfix-ime links with `default-features = false`.
+default = ["app"]
+app = ["dep:windows", "dep:windows-sys"]
+
+[[bin]]
+name = "hanfix"
+path = "src/main.rs"
+required-features = ["app"]

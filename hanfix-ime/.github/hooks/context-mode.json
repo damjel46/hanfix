@@ -1,0 +1,48 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/usr/bin/node\" \"/home/from104/.claude/plugins/marketplaces/context-mode/hooks/vscode-copilot/pretooluse.mjs\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/usr/bin/node\" \"/home/from104/.claude/plugins/marketplaces/context-mode/hooks/vscode-copilot/posttooluse.mjs\""
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/usr/bin/node\" \"/home/from104/.claude/plugins/marketplaces/context-mode/hooks/vscode-copilot/precompact.mjs\""
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/usr/bin/node\" \"/home/from104/.claude/plugins/marketplaces/context-mode/hooks/vscode-copilot/sessionstart.mjs\""
+          }
+        ]
+      }
+    ]
+  }
+}

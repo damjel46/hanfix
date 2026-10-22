@@ -1,0 +1,18 @@
+[package]
+name = "unim-capi"
+version.workspace = true
+edition = "2021"
+description = "C API bindings for UNIM Korean Input Method Engine"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "unim_capi"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+unim = { path = ".." }
+
+[build-dependencies]
+cbindgen = "0.28"

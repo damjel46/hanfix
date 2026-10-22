@@ -1,0 +1,237 @@
+Source: unim
+Section: utils
+Priority: optional
+Maintainer: from104 <from104@gmail.com>
+Build-Depends: debhelper-compat (= 13),
+               cmake,
+               pkg-config,
+               chrpath,
+               libgtk-3-dev,
+               libgtk-4-dev,
+               libadwaita-1-dev,
+               qtbase5-dev,
+               qtbase5-private-dev,
+               qt6-base-dev,
+               qt6-base-private-dev,
+               qt6-declarative-dev,
+               libqt6dbus6,
+               libglib2.0-dev,
+               libdbus-1-dev,
+               libwayland-dev,
+               libxkbcommon-dev,
+               libx11-dev,
+               libxcb1-dev
+Standards-Version: 4.7.0
+Homepage: https://github.com/from104/unim
+Vcs-Git: https://github.com/from104/unim.git
+Vcs-Browser: https://github.com/from104/unim
+Bugs: https://github.com/from104/unim/issues
+Rules-Requires-Root: no
+
+Package: unim-common
+Architecture: any
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         dbus
+Recommends: im-config, fonts-noto-cjk,
+            pulseaudio-utils | pipewire-bin | alsa-utils
+Description: UNIM Korean IME — core engine, daemon, CLI, shared library
+ UNIM is a modular Korean Input Method Engine written in Rust with
+ 2-bul and 3-bul Hangul layouts and automatic Korean/English typo
+ correction (TypeFix).
+ .
+ This package contains the pieces every UNIM install needs:
+  * libunim_capi shared library (stable internal C-API consumed by
+    GTK/Qt input method modules)
+  * unim-daemon — central engine, D-Bus session-activated
+  * unim-cli — unified command-line interface (incl. `config`
+    subcommand)
+  * D-Bus service file, icons, im-config integration, man pages
+ .
+ Install a frontend package (unim-xim, unim-wayland) and an IM module
+ package (unim-im-gtk, unim-im-qt) to actually type Korean in apps,
+ or install the `unim` meta-package for the full stack.
+
+Package: unim-im-gtk
+Architecture: any
+Depends: unim-common (= ${binary:Version}),
+         ${shlibs:Depends},
+         ${misc:Depends}
+Recommends: unim-xim | unim-wayland
+Description: UNIM Korean IME — GTK3/GTK4 input method modules
+ GTK3 and GTK4 input method modules for the UNIM Korean Input Method
+ Engine. Enables Korean typing in every GTK-based application
+ (GNOME, Xfce, MATE, Cinnamon, GIMP, Inkscape, etc.).
+ .
+ The modules delegate all composition work to unim-daemon over D-Bus
+ and ship as standard GTK immodules discovered via the multiarch
+ immodules directory.
+
+Package: unim-im-qt
+Architecture: any
+Depends: unim-common (= ${binary:Version}),
+         ${shlibs:Depends},
+         ${misc:Depends}
+Recommends: unim-xim | unim-wayland
+Description: UNIM Korean IME — Qt5/Qt6 platform input context plugins
+ Qt5 and Qt6 platform input context plugins for the UNIM Korean
+ Input Method Engine. Enables Korean typing in every Qt-based
+ application (KDE Plasma apps, Telegram Desktop, qBittorrent, Qt
+ Creator, many cross-platform editors).
+ .
+ The plugins delegate all composition work to unim-daemon over D-Bus
+ and ship under Qt's platforminputcontexts plugin directory.
+
+Package: unim-xim
+Architecture: any
+Depends: unim-common (= ${binary:Version}),
+         ${shlibs:Depends},
+         ${misc:Depends}
+Description: UNIM Korean IME — XIM protocol frontend (X11)
+ X11 XIM protocol server for the UNIM Korean Input Method Engine.
+ Required in X11 sessions and for legacy applications that only
+ speak XIM (e.g. xterm, emacs -nw, many Java/AWT apps).
+ .
+ Install this package alongside the GTK/Qt IM module packages when
+ running an X11 session. On Wayland sessions, install unim-wayland
+ instead (both may coexist for XWayland fallback).
+
+Package: unim-wayland
+Architecture: any
+Depends: unim-common (= ${binary:Version}),
+         ${shlibs:Depends},
+         ${misc:Depends}
+Description: UNIM Korean IME — Wayland input-method frontend
+ Wayland input-method-v2 + virtual-keyboard-v1 protocol server for
+ the UNIM Korean Input Method Engine, with hanja/special-character
+ popup via zwp_input_popup_surface_v2.
+ .
+ Required in pure Wayland sessions (KDE Plasma Wayland, Sway,
+ Hyprland, COSMIC, Labwc, Wayfire). GNOME Shell users should
+ additionally install unim-gnome for native indicator integration.
+
+Package: unim-desktop
+Architecture: any
+Depends: unim-common (= ${binary:Version}),
+         ${shlibs:Depends},
+         ${misc:Depends}
+Recommends: unim-im-gtk, unim-settings
+Replaces: unim-gui-gtk (<< 0.3.0~),
+          unim-gui-qt (<< 0.3.0~),
+          unim-indicator (<< 0.3.0-1.1~),
+          unim-settings (<< 0.3.0-1.1~),
+          unim-popup-service (<< 0.3.0-1.1~)
+Breaks: unim-gui-gtk (<< 0.3.0~),
+        unim-gui-qt (<< 0.3.0~),
+        unim-indicator (<< 0.3.0-1.1~),
+        unim-settings (<< 0.3.0-1.1~),
+        unim-popup-service (<< 0.3.0-1.1~)
+Description: UNIM Korean IME — desktop UI (tray indicator, settings, popups)
+ GTK4 desktop user-interface bundle for the UNIM Korean Input Method
+ Engine on non-GNOME desktops (KDE Plasma, Xfce, Cinnamon, MATE).
+ Bundles the three UI processes that are always deployed together:
+  * tray indicator (StatusNotifierItem) — global mode toggle and menu
+  * settings dialog (unim-settings-gtk, Adw.PreferencesWindow) — hotkeys,
+    layouts, TypeFix, blacklist, popup behaviour
+  * popup & tray service — hanja/special-character/emoji popups,
+    D-Bus-activated, with X11 (override-redirect) and Wayland
+    (xdg-popup / input_popup_v2) backends
+ .
+ GNOME Shell users get the same functionality natively via the
+ "unim-gnome" extension and normally do not need this package.
+ .
+ Replaces the previous unim-gui-qt binary; the Qt6/QML GUI has been
+ deprecated and removed in favour of a single GTK4 codebase. This
+ package supersedes the earlier split unim-indicator, unim-settings
+ (the pre-0.3.63 GTK dialog, now shipped here as unim-settings-gtk —
+ not the new Slint unim-settings package) and unim-popup-service
+ packages.
+
+Package: unim-settings
+Architecture: any
+Depends: unim-common (= ${binary:Version}),
+         ${shlibs:Depends},
+         ${misc:Depends}
+Recommends: im-config, fontconfig
+Replaces: unim-desktop (<< 0.3.63-1~)
+Breaks: unim-desktop (<< 0.3.63-1~)
+Description: UNIM Korean IME — settings app & first-run wizard (Slint)
+ Cross-platform settings application (Slint, winit + Skia) sharing one
+ codebase with the Windows build. Includes the first-run wizard
+ (--first-run, --whats-new) and its per-login autostart gate
+ (--first-run-if-needed) that guides default-IME setup via im-config.
+ .
+ Takes over /usr/bin/unim-settings from earlier unim-desktop builds,
+ where that name was the GTK4 dialog (now unim-settings-gtk).
+
+Package: unim-keymap-studio
+Architecture: any
+Depends: unim-common (= ${binary:Version}),
+         ${shlibs:Depends},
+         ${misc:Depends}
+Description: UNIM Keymap Studio — view and edit Hangul keymaps
+ GTK4/libadwaita tool that opens any v1·v2·v3 Hangul keymap
+ profile (built-in or user-defined), shows the 4×N key layout
+ with Upper/Lower toggle and per-key metadata, and lets you edit
+ individual keys, cho/jung/jong combinations, rule sets and the
+ moachigi marker. Saves to ~/.config/unim/layouts/ so the result
+ is immediately picked up by the rest of UNIM.
+
+Package: unim-typing-practice
+Architecture: any
+Depends: unim-common (= ${binary:Version}),
+         ${shlibs:Depends},
+         ${misc:Depends}
+Description: UNIM Typing Practice — WPM/accuracy/heatmap on any Hangul keymap
+ GTK4/libadwaita tool that runs a typing-practice session on
+ the currently selected UNIM Hangul keymap. Captures raw ASCII
+ keys (bypassing any active system IME), feeds them through the
+ keymap's composer, and reports live WPM, CPM, accuracy and
+ error rate. After each session the per-key error heatmap is
+ painted on top of the keyboard.
+
+# GAP-dpkg-02: unim-gnome·unim(메타) 는 Architecture: all 이라 ${source:Version}
+# 를 쓴다 — Debian 정책상 arch:all 패키지가 같은 소스에서 나온 arch:any 패키지에
+# 의존할 때는 ${binary:Version}(빌드 아키텍처별로 값이 달라질 수 있음) 대신
+# ${source:Version} 을 써야 한다. 나머지 9개 arch:any 패키지가 서로 참조할 때
+# ${binary:Version} 을 쓰는 것과 대비되는, 의도된 차이다 — 통일 대상 아님.
+Package: unim-gnome
+Architecture: all
+Depends: unim-common (= ${source:Version}),
+         unim-desktop (= ${source:Version}),
+         ${misc:Depends},
+         gnome-shell
+Recommends: unim-settings
+Description: UNIM Korean IME — GNOME Shell extension
+ Native GNOME Shell extension for the UNIM Korean Input Method
+ Engine. Adds a top-panel indicator, hotkey management, per-app
+ input-mode rules, and virtual keyboard / preedit overlay on
+ Wayland (Mutter).
+ .
+ Hanja / special-character / emoji popups and the settings dialog
+ come from the companion `unim-desktop` bundle (GTK4), shared across
+ all desktops. On GNOME its tray indicator stays dormant — this
+ extension provides the panel indicator natively.
+
+Package: unim
+Architecture: all
+Depends: unim-common (= ${source:Version}),
+         unim-im-gtk (= ${source:Version}),
+         unim-im-qt (= ${source:Version}),
+         unim-xim (= ${source:Version}),
+         unim-wayland (= ${source:Version}),
+         unim-desktop (= ${source:Version}),
+         unim-settings (= ${source:Version}),
+         unim-keymap-studio (= ${source:Version}),
+         unim-typing-practice (= ${source:Version}),
+         unim-gnome (= ${source:Version}),
+         ${misc:Depends}
+Description: Korean Input Method Engine — full stack (meta-package)
+ Meta-package that pulls in the complete UNIM Korean Input Method
+ Engine: core engine, every IM module, every protocol frontend,
+ both GUIs, and the GNOME Shell extension. Install this when you
+ want "UNIM, everything included" without picking individual
+ packages.
+ .
+ Power users who want a smaller footprint can install only the
+ pieces they need — see the individual package descriptions.

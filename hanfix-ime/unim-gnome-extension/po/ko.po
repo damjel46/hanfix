@@ -1,0 +1,198 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: unim\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-27 09:20+0900\n"
+"PO-Revision-Date: 2026-07-27 09:20+0900\n"
+"Last-Translator: \n"
+"Language-Team: \n"
+"Language: ko\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: extension.js:652
+msgid "UNIM TypeFIX"
+msgstr "UNIM TypeFIX (한영 자동 변환)"
+
+#: extension.js:652
+#, javascript-format
+msgid "Conversion complete: %s"
+msgstr "변환 완료: %s"
+
+#: extension.js:707 extension.js:718
+msgid "UNIM Dictionary"
+msgstr "UNIM Dictionary"
+
+#: extension.js:708
+msgid "Selection is empty, invalid, or already registered."
+msgstr "Selection is empty, invalid, or already registered."
+
+#: extension.js:719
+#, javascript-format
+msgid "Registered '%s' to the reverse user dictionary."
+msgstr "Registered '%s' to the reverse user dictionary."
+
+#: prefs.js:21
+msgid "UNIM"
+msgstr "UNIM"
+
+#: prefs.js:30
+msgid "일반 설정"
+msgstr "일반 설정"
+
+#: prefs.js:31
+msgid ""
+"자판·입력 모드·오타 교정 등 일반 설정은 UNIM 설정 앱(unim-settings)에서 관리"
+"합니다."
+msgstr ""
+"자판·입력 모드·오타 교정 등 일반 설정은 UNIM 설정 앱(unim-settings)에서 관리"
+"합니다."
+
+#: prefs.js:36
+msgid "UNIM 설정 앱 열기"
+msgstr "UNIM 설정 앱 열기"
+
+#: prefs.js:37
+msgid "자판, 모드, 단축키, 자동 교정 등 모든 일반 설정"
+msgstr "자판, 모드, 단축키, 자동 교정 등 모든 일반 설정"
+
+#: prefs.js:53
+msgid "UNIM 설정 앱 실행 실패. 터미널에서 `unim-settings`를 직접 실행하세요."
+msgstr "UNIM 설정 앱 실행 실패. 터미널에서 `unim-settings`를 직접 실행하세요."
+
+#: prefs.js:70
+msgid "표시"
+msgstr "표시"
+
+#: prefs.js:76
+msgid "왼쪽 클릭 = 한/영 전환"
+msgstr "왼쪽 클릭 = 한/영 전환"
+
+#: prefs.js:77
+msgid "왼쪽 클릭 = 메뉴 (GNOME 기본)"
+msgstr "왼쪽 클릭 = 메뉴 (GNOME 기본)"
+
+#: prefs.js:79
+msgid "패널 클릭 동작"
+msgstr "패널 클릭 동작"
+
+#: prefs.js:80
+msgid "오른쪽 클릭은 항상 메뉴를 표시합니다."
+msgstr "오른쪽 클릭은 항상 메뉴를 표시합니다."
+
+#: prefs.js:92
+msgid "변환 알림 표시"
+msgstr "변환 알림 표시"
+
+#: prefs.js:93
+msgid "오타 교정 시 알림 메시지 표시"
+msgstr "오타 교정 시 알림 메시지 표시"
+
+#: prefs.js:99
+msgid "실시간 입력기"
+msgstr "실시간 입력기"
+
+#: prefs.js:100
+msgid "Wayland 세션 전용. Clutter.InputMethod로 IBus를 대체합니다."
+msgstr "Wayland 세션 전용. Clutter.InputMethod로 IBus를 대체합니다."
+
+#: prefs.js:105
+msgid "IME 모드 활성화"
+msgstr "IME 모드 활성화"
+
+#: prefs.js:106
+msgid "Wayland 세션에서 한글 실시간 입력"
+msgstr "Wayland 세션에서 한글 실시간 입력"
+
+#: prefs.js:111
+msgid "Wayland 세션에서만 사용 가능합니다."
+msgstr "Wayland 세션에서만 사용 가능합니다."
+
+#: prefs.js:118
+msgid "변환 단축키"
+msgstr "변환 단축키"
+
+#: prefs.js:119
+msgid "포커스된 단어를 순/역방향으로 변환 후 교체"
+msgstr "포커스된 단어를 순/역방향으로 변환 후 교체"
+
+#: prefs.js:124
+msgid "영어 → 한글"
+msgstr "영어 → 한글"
+
+#: prefs.js:124
+msgid "gksrmf → 한글"
+msgstr "gksrmf → 한글"
+
+#: prefs.js:126
+msgid "한글 → 영어"
+msgstr "한글 → 영어"
+
+#: prefs.js:126
+msgid "ㅗ디ㅣㅐ → hello"
+msgstr "ㅗ디ㅣㅐ → hello"
+
+#: prefs.js:132
+msgid "사용자 사전 등록"
+msgstr "사용자 사전 등록"
+
+#: prefs.js:133
+msgid "선택한 한글을 영문으로 변환해 역방향 교정 사용자 사전에 추가합니다."
+msgstr "선택한 한글을 영문으로 변환해 역방향 교정 사용자 사전에 추가합니다."
+
+#: prefs.js:138
+msgid "선택 영역 등록"
+msgstr "선택 영역 등록"
+
+#: prefs.js:138
+msgid "ㅎㅑㅅ → git (CLI 명령어 등)"
+msgstr "ㅎㅑㅅ → git (CLI 명령어 등)"
+
+#: prefs.js:186
+msgid "기본값 복원"
+msgstr "기본값 복원"
+
+#. === 입력 모드 선택 ===
+#: indicator.js:98
+msgid "한국어 모드 (Korean)"
+msgstr "한국어 모드 (Korean)"
+
+#: indicator.js:102
+msgid "영어 모드 (English)"
+msgstr "영어 모드 (English)"
+
+#. === UNIM 설정 앱 (unim-settings) ===
+#: indicator.js:109
+msgid "UNIM 설정 (Settings)..."
+msgstr "UNIM 설정 (Settings)..."
+
+#. === GNOME 확장 설정 ===
+#: indicator.js:114
+msgid "GNOME 확장 설정 (Extension)..."
+msgstr "GNOME 확장 설정 (Extension)..."
+
+#. === 오프라인 사용자 매뉴얼 ===
+#: indicator.js:119
+msgid "도움말 (Help)"
+msgstr "도움말 (Help)"
+
+#: indicator.js:130
+msgid "⚠️ UNIM 데몬 연결 안됨"
+msgstr "⚠️ UNIM 데몬 연결 안됨"
+
+#: indicator.js:132
+msgid "💤 입력 대기 중"
+msgstr "💤 입력 대기 중"
+
+#: indicator.js:134
+msgid "🇰🇷 한국어 입력 중"
+msgstr "🇰🇷 한국어 입력 중"
+
+#: indicator.js:134
+msgid "🔤 영어 입력 중"
+msgstr "🔤 영어 입력 중"
+
+#: indicator.js:332
+msgid "UNIM 데몬이 실행 중이지 않습니다."
+msgstr "UNIM 데몬이 실행 중이지 않습니다."

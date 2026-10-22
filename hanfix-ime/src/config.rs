@@ -1,0 +1,2688 @@
+//! 설정 모듈
+//!
+//! UNIM 입력기의 설정을 관리합니다.
+
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+/// 입력 카테고리 (한국어/영어)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[repr(C)]
+pub enum InputCategory {
+    /// 한국어 (Korean) 입력 모드
+    Korean,
+    /// 영어 (English) 입력 모드
+    #[default]
+    English,
+}
+
+/// 입력 모드 공유 방식
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[repr(C)]
+pub enum ModeSharingMode {
+    /// 모든 앱/창이 동일한 한/영 상태를 공유 (기본). 어떤 context 에서 한/영 토글이
+    /// 일어나면 default_category 및 모든 활성 context 의 input_category 가 동기화됨
+    /// — 같은 앱 안 여러 윈도우 간 모드 일관성 보장.
+    #[default]
+    Global,
+    /// 각 앱이 독립적인 한/영 상태를 유지. window_id 의 ':' 앞부분으로 앱 식별.
+    PerApp,
+}
+
+impl ModeSharingMode {
+    /// 표시용 레이블을 반환합니다.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            ModeSharingMode::Global => "전역 공유",
+            ModeSharingMode::PerApp => "앱별 독립",
+        }
+    }
+
+    /// 사용 가능한 모든 모드를 반환합니다.
+    pub fn all() -> &'static [ModeSharingMode] {
+        &[ModeSharingMode::Global, ModeSharingMode::PerApp]
+    }
+}
+
+/// 조합 확정 단위 — 음절/단어/스마트.
+///
+/// preedit 을 어느 경계까지 유지하다 commit 할지 결정한다.
+/// - `Syllable` (기본): 음절이 완성되면 즉시 확정 (기존 동작, 무회귀).
+/// - `Word`: 단어 경계(공백/문장부호)까지 preedit 으로 누적 — 자동교정이
+///   조합 전체를 SetText 로 치환할 수 있게 한다 (`accumulate_word` 코어 substrate).
+/// - `Smart`: 문맥에 따라 음절/단어 단위를 자동 선택 (Phase 3 로직, 현재는 Syllable 동작).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[repr(C)]
+pub enum CommitUnit {
+    /// 음절 단위 확정. 한 음절이 완성되면 즉시 commit.
+    Syllable,
+    /// 단어 단위 확정. 단어 경계까지 preedit 으로 누적.
+    /// (hanfix-ime 는 설치 시 config 에 `commit_unit: Word` 를 쓴다 — 교정을 조합 치환으로 하려면
+    /// 단어 모드가 필요하다. 코드 기본값은 UNIM 과 같게 둔다.)
+    Word,
+    /// 스마트 (기본) — 문맥(앱)에 따라 음절/단어 단위를 자동 선택. 현재 보수적
+    /// 정책으로 MS Word(winword.exe) 등 협조 앱만 단어 단위, 그 외는 음절 단위.
+    ///
+    /// 기본값을 `Smart` 로 둔 이유: TSF 게이트가 설정을 무시하고 winword 만 단어
+    /// 모드로 하드코딩하던 종전 출고 동작과 바이트 동일하게 보존하기 위함이다
+    /// (`Syllable` 기본이면 실측 중이던 Word 자동교정이 기본 OFF 로 회귀).
+    /// `#[repr(C)]` 판별자 순서(Syllable=0/Word=1/Smart=2)는 불변 — 변형 재배치 없이
+    /// `#[default]` 위치만 이동.
+    #[default]
+    Smart,
+}
+
+impl CommitUnit {
+    /// 표시용 레이블을 반환합니다.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            CommitUnit::Syllable => "음절 단위",
+            CommitUnit::Word => "단어 단위",
+            CommitUnit::Smart => "스마트",
+        }
+    }
+
+    /// 사용 가능한 모든 확정 단위를 반환합니다.
+    pub fn all() -> &'static [CommitUnit] {
+        &[CommitUnit::Syllable, CommitUnit::Word, CommitUnit::Smart]
+    }
+}
+
+/// 한국어 키보드 레이아웃 식별자 — 자판 프로필 이름을 담는 문자열 래퍼.
+///
+/// 레거시 시절 enum(`Dubeolsik` / `Sebeolsik390` / ...)이었던 필드를 Phase 8에서
+/// 문자열로 통합. 내장 4종은 `ko_2bulstd`·`ko_3bul390`·`ko_3bul391`·`ko_3bul_noshift`,
+/// 사용자 정의는 `~/.config/unim/layouts/<name>.json` 파일의 `name` 필드.
+///
+/// YAML 역직렬화 시 `normalize_korean_layout_name`을 거쳐 레거시 enum 값
+/// (`Dubeolsik` 등)과 별칭(`2bul` 등)을 모두 수용한다. 이는 *config 값 정규화*이며,
+/// *프로필 JSON 스키마*와는 무관하다 (v0 layout profile JSON은 0.2.0+ 거부 — 별도
+/// `LoadError::UnsupportedSchema`).
+pub type KoreanLayout = String;
+
+/// 내장 한국어 자판의 정식 이름(레지스트리 키).
+pub const KOREAN_LAYOUT_DUBEOLSIK: &str = "ko_2bulstd";
+pub const KOREAN_LAYOUT_SEBEOLSIK_390: &str = "ko_3bul390";
+pub const KOREAN_LAYOUT_SEBEOLSIK_391: &str = "ko_3bul391";
+pub const KOREAN_LAYOUT_SEBEOLSIK_NOSHIFT: &str = "ko_3bul_noshift";
+
+/// 내장 한국어 자판 4종(이관 시점 기준). 표시용·CLI 나열 등에 사용.
+///
+/// 0.2.0+: 쿼티형 세벌식(`ko_3bul_qwerty`)은 빌트인에서 제거되어 연구 자료로만
+/// 보존된다. 사용자가 직접 사용하려면 `docs/references/keymaps/ko_3bul_qwerty.json`
+/// 을 `~/.config/unim/layouts/`에 복사.
+pub const KOREAN_LAYOUT_BUILTINS: &[&str] = &[
+    KOREAN_LAYOUT_DUBEOLSIK,
+    KOREAN_LAYOUT_SEBEOLSIK_390,
+    KOREAN_LAYOUT_SEBEOLSIK_391,
+    KOREAN_LAYOUT_SEBEOLSIK_NOSHIFT,
+];
+
+/// 레거시 enum 이름·별칭을 내장 정식 이름으로 승격한다.
+///
+/// 예: `"Dubeolsik"`·`"2bul"`·`"2bulstd"` → `"ko_2bulstd"`. 이미 정식 이름이거나
+/// 매칭 대상이 없으면 입력을 그대로 반환(사용자 프로필 이름 허용).
+pub fn normalize_korean_layout_name(raw: &str) -> String {
+    match raw {
+        "Dubeolsik" | "2bul" | "2bulstd" => KOREAN_LAYOUT_DUBEOLSIK.to_string(),
+        "Sebeolsik390" | "390" | "3bul390" => KOREAN_LAYOUT_SEBEOLSIK_390.to_string(),
+        "Sebeolsik391" | "391" | "3bul391" => KOREAN_LAYOUT_SEBEOLSIK_391.to_string(),
+        "SebeolsikNoShift" | "noshift" | "3bul_noshift" => {
+            KOREAN_LAYOUT_SEBEOLSIK_NOSHIFT.to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// 세벌식 계열 자판인지 판정. `ko_3bul*` 또는 `3bul*` 접두 또는 명시 리스트 매칭.
+pub fn is_sebeolsik_layout(name: &str) -> bool {
+    matches!(
+        name,
+        "Sebeolsik390"
+            | "Sebeolsik391"
+            | "SebeolsikNoShift"
+            | "390"
+            | "391"
+            | "noshift"
+            | "ko_anmatae"
+            | "anmatae"
+            | "anmatae_2003"
+    ) || name.starts_with("ko_3bul")
+        || name.starts_with("3bul")
+}
+
+/// 내장 자판의 한국어 표시 레이블.
+///
+/// 반환값이 `""`이면 "내장이 아님"(= 사용자 프로필). GUI는 프로필 metadata의
+/// `display_name`을 resolve 해야 한다.
+pub fn korean_layout_display_name(name: &str) -> &'static str {
+    match normalize_korean_layout_name(name).as_str() {
+        KOREAN_LAYOUT_DUBEOLSIK => "두벌식 표준",
+        KOREAN_LAYOUT_SEBEOLSIK_390 => "세벌식 390",
+        KOREAN_LAYOUT_SEBEOLSIK_391 => "세벌식 최종",
+        KOREAN_LAYOUT_SEBEOLSIK_NOSHIFT => "세벌식 순아래",
+        _ => "",
+    }
+}
+
+/// 영어 키보드 레이아웃 식별자 — 자판 프로필 이름을 담는 문자열 래퍼.
+///
+/// 레거시 시절 enum(`Qwerty` / `Dvorak` / ...)이었던 필드를 Phase 9에서
+/// 문자열로 통합. 내장 5종은 `qwerty`·`dvorak`·`colemak`·`colemak_dh`·`workman`.
+///
+/// YAML 역직렬화 시 `EnglishConfigCompat`을 거쳐 레거시 enum 값(`Qwerty` 등)을
+/// 소문자 내장 이름으로 승격한다. 타입 호환을 위해 String 별칭으로 노출.
+pub type EnglishLayout = String;
+
+/// 내장 영어 자판의 정식 이름.
+pub const ENGLISH_LAYOUT_QWERTY: &str = "qwerty";
+pub const ENGLISH_LAYOUT_DVORAK: &str = "dvorak";
+pub const ENGLISH_LAYOUT_COLEMAK: &str = "colemak";
+pub const ENGLISH_LAYOUT_COLEMAK_DH: &str = "colemak_dh";
+pub const ENGLISH_LAYOUT_WORKMAN: &str = "workman";
+
+/// 내장 영어 자판 5종.
+pub const ENGLISH_LAYOUT_BUILTINS: &[&str] = &[
+    ENGLISH_LAYOUT_QWERTY,
+    ENGLISH_LAYOUT_DVORAK,
+    ENGLISH_LAYOUT_COLEMAK,
+    ENGLISH_LAYOUT_COLEMAK_DH,
+    ENGLISH_LAYOUT_WORKMAN,
+];
+
+/// 레거시 enum 이름을 소문자 내장 이름으로 승격한다. 알 수 없는 값은 pass-through.
+pub fn normalize_english_layout_name(raw: &str) -> String {
+    match raw {
+        "Qwerty" => ENGLISH_LAYOUT_QWERTY.to_string(),
+        "Dvorak" => ENGLISH_LAYOUT_DVORAK.to_string(),
+        "Colemak" => ENGLISH_LAYOUT_COLEMAK.to_string(),
+        "ColemakDh" | "colemak-dh" => ENGLISH_LAYOUT_COLEMAK_DH.to_string(),
+        "Workman" => ENGLISH_LAYOUT_WORKMAN.to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// 내장 영어 자판의 keymap JSON 파일명. 내장이 아니면 입력을 그대로 반환
+/// (사용자 프로필 이름이 곧 파일명 stem인 경우를 위해).
+pub fn english_layout_keymap_name(name: &str) -> String {
+    let normalized = normalize_english_layout_name(name);
+    match normalized.as_str() {
+        ENGLISH_LAYOUT_QWERTY => "en_qwerty".to_string(),
+        ENGLISH_LAYOUT_DVORAK => "en_dvorak".to_string(),
+        ENGLISH_LAYOUT_COLEMAK => "en_colemak".to_string(),
+        ENGLISH_LAYOUT_COLEMAK_DH => "en_colemak_dh".to_string(),
+        ENGLISH_LAYOUT_WORKMAN => "en_workman".to_string(),
+        _ => normalized,
+    }
+}
+
+/// 내장 영어 자판의 표시 레이블. 사용자 프로필이면 빈 문자열 — GUI는
+/// 프로필 metadata의 display_name을 resolve 해야 한다.
+pub fn english_layout_display_name(name: &str) -> &'static str {
+    match normalize_english_layout_name(name).as_str() {
+        ENGLISH_LAYOUT_QWERTY => "QWERTY",
+        ENGLISH_LAYOUT_DVORAK => "Dvorak",
+        ENGLISH_LAYOUT_COLEMAK => "Colemak",
+        ENGLISH_LAYOUT_COLEMAK_DH => "Colemak-DH",
+        ENGLISH_LAYOUT_WORKMAN => "Workman",
+        _ => "",
+    }
+}
+
+/// 내장 영어 자판의 상단 행(2nd row) 앞 9개 키 레이블 — 특수문자 팝업 헤더용.
+/// 내장이 아니면 빈 문자열.
+pub fn english_layout_top_row_labels(name: &str) -> &'static str {
+    match normalize_english_layout_name(name).as_str() {
+        ENGLISH_LAYOUT_QWERTY => "QWERTYUIO",
+        ENGLISH_LAYOUT_DVORAK => "',.PYFGCR",
+        ENGLISH_LAYOUT_COLEMAK => "QWFPGJLUY",
+        ENGLISH_LAYOUT_COLEMAK_DH => "QWFPBJLUY",
+        ENGLISH_LAYOUT_WORKMAN => "QDRWBJFUP",
+        _ => "",
+    }
+}
+
+/// 내장 영어 자판의 홈 행(3rd row) 앞 9개 키 레이블 — 이모지 카테고리 단축키 표시용.
+/// 물리 키 위치 (qwerty 의 ASDFGHJKL) 는 `KeyCode::A..L` 로 고정 매핑되며, 본 함수는
+/// 사용자에게 보일 레이블만 레이아웃에 따라 변환한다.
+/// 내장이 아니면 빈 문자열.
+pub fn english_layout_home_row_labels(name: &str) -> &'static str {
+    match normalize_english_layout_name(name).as_str() {
+        ENGLISH_LAYOUT_QWERTY => "ASDFGHJKL",
+        ENGLISH_LAYOUT_DVORAK => "AOEUIDHTN",
+        ENGLISH_LAYOUT_COLEMAK => "ARSTDHNEI",
+        ENGLISH_LAYOUT_COLEMAK_DH => "ARSTGMNEI",
+        ENGLISH_LAYOUT_WORKMAN => "ASHTGYNEO",
+        _ => "",
+    }
+}
+
+/// 입력 필드의 목적 (Content Type Hint)
+///
+/// 프론트엔드가 감지한 입력 필드의 용도를 나타냅니다.
+/// Password/Pin 필드에서는 한글 모드를 자동으로 차단합니다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[repr(u32)]
+pub enum ContentPurpose {
+    /// 일반 텍스트 입력
+    #[default]
+    Normal = 0,
+    /// 비밀번호 입력 (한글 차단)
+    Password = 1,
+    /// PIN 입력 (한글 차단)
+    Pin = 2,
+    /// 이메일 주소 입력
+    Email = 3,
+    /// 숫자 입력
+    Number = 4,
+    /// URL 입력
+    Url = 5,
+    /// 터미널 입력
+    Terminal = 6,
+}
+
+impl ContentPurpose {
+    /// u32 값에서 변환합니다.
+    pub fn from_u32(value: u32) -> Self {
+        match value {
+            0 => ContentPurpose::Normal,
+            1 => ContentPurpose::Password,
+            2 => ContentPurpose::Pin,
+            3 => ContentPurpose::Email,
+            4 => ContentPurpose::Number,
+            5 => ContentPurpose::Url,
+            6 => ContentPurpose::Terminal,
+            _ => ContentPurpose::Normal,
+        }
+    }
+
+    /// 한글 입력을 차단해야 하는 목적인지 확인합니다.
+    pub fn should_block_hangul(&self) -> bool {
+        matches!(self, ContentPurpose::Password | ContentPurpose::Pin)
+    }
+}
+
+/// AutoTypeFix 값 범위 상수
+pub const AUTO_TYPEFIX_KOR_THRESHOLD_MIN: u8 = 2;
+pub const AUTO_TYPEFIX_KOR_THRESHOLD_MAX: u8 = 6;
+pub const AUTO_TYPEFIX_ENG_MIN_LENGTH_MIN: u8 = 3;
+pub const AUTO_TYPEFIX_ENG_MIN_LENGTH_MAX: u8 = 8;
+pub const AUTO_TYPEFIX_TIME_WINDOW_MIN: u32 = 500;
+pub const AUTO_TYPEFIX_TIME_WINDOW_MAX: u32 = 5000;
+pub const AUTO_TYPEFIX_TENTATIVE_EXPIRY_MIN: u16 = 1;
+pub const AUTO_TYPEFIX_TENTATIVE_EXPIRY_MAX: u16 = 12;
+pub const AUTO_TYPEFIX_OBSERVATION_TIMEOUT_MIN: u8 = 5;
+pub const AUTO_TYPEFIX_OBSERVATION_TIMEOUT_MAX: u8 = 15;
+
+fn default_auto_typefix_enabled() -> bool {
+    true
+}
+fn default_auto_typefix_time_window_ms() -> u32 {
+    5000
+}
+fn default_auto_typefix_forward_time_window_ms() -> u32 {
+    default_auto_typefix_time_window_ms()
+}
+fn default_auto_typefix_reverse_time_window_ms() -> u32 {
+    default_auto_typefix_time_window_ms()
+}
+fn default_auto_typefix_kor_syllable_threshold() -> u8 {
+    2
+}
+fn default_auto_typefix_eng_word_min_length() -> u8 {
+    5
+}
+fn default_auto_typefix_forward() -> bool {
+    true
+}
+fn default_auto_typefix_reverse() -> bool {
+    true
+}
+fn default_auto_typefix_skip_on_english_word() -> bool {
+    true
+}
+fn default_auto_typefix_skip_on_complete_syllable() -> bool {
+    true
+}
+fn default_auto_typefix_rollback_detection() -> bool {
+    // hanfix-ime: off — learning happens on an explicit Ctrl+Z undo of a correction instead.
+    false
+}
+fn default_auto_typefix_tentative_expiry_hours() -> u16 {
+    4
+}
+fn default_auto_typefix_observation_timeout_secs() -> u8 {
+    10
+}
+fn default_auto_typefix_user_dict_enabled() -> bool {
+    true
+}
+fn default_auto_typefix_toggle_enabled_keys() -> Vec<String> {
+    // base 가 F8 인 이유: F9~F11 은 미디어 키·잘라내기/복사/붙여넣기 리매핑
+    // (input-remapper 등)으로 OS 에 도달하지 못하는 키보드가 실재해(실사용 보고)
+    // 도달성이 좋은 F8 을 쓴다. 한자/이모지 트리거(맨 F9)와도 자연히 무충돌.
+    // Shift 조합인 이유: 수정자 정확-일치라 맨 F8 및 다른 조합(Ctrl+F8 등)은
+    // 매칭되지 않고 종전대로 앱에 전달된다.
+    vec!["Shift+F8".to_string()]
+}
+fn default_auto_typefix_toggle_forward_keys() -> Vec<String> {
+    Vec::new()
+}
+fn default_auto_typefix_toggle_reverse_keys() -> Vec<String> {
+    Vec::new()
+}
+
+/// 자동 오타 교정 (AutoTypeFix) 설정
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoTypeFixConfig {
+    /// 활성화 여부
+    #[serde(default = "default_auto_typefix_enabled")]
+    pub enabled: bool,
+    /// 순방향 (영→한) 시간 윈도우 (ms) — 이 시간 내의 키스트로크만 검사 (500~5000)
+    #[serde(default = "default_auto_typefix_forward_time_window_ms")]
+    pub forward_time_window_ms: u32,
+    /// 역방향 (한→영) 시간 윈도우 (ms) — 이 시간 내의 키스트로크만 검사 (500~5000)
+    #[serde(default = "default_auto_typefix_reverse_time_window_ms")]
+    pub reverse_time_window_ms: u32,
+    /// [DEPRECATED] 구(舊) 통합 시간 윈도우. 후처리 단계에서 forward/reverse 두 필드에
+    /// 주입되고 제거된다. 직렬화에서는 `skip_serializing_if`로 숨겨 신규 config 파일에는
+    /// 남지 않는다. 역호환 용도로만 유지.
+    #[serde(default, skip_serializing)]
+    pub time_window_ms: Option<u32>,
+    /// 순방향 (영→한) 트리거: 한글 완성 음절 수 (2~6)
+    #[serde(default = "default_auto_typefix_kor_syllable_threshold")]
+    pub kor_syllable_threshold: u8,
+    /// 역방향 (한→영) 트리거: 영문 단어 최소 길이 (3~8)
+    #[serde(default = "default_auto_typefix_eng_word_min_length")]
+    pub eng_word_min_length: u8,
+    /// 순방향 (영→한 교정) 활성화
+    #[serde(default = "default_auto_typefix_forward")]
+    pub forward: bool,
+    /// 역방향 (한→영 교정) 활성화
+    #[serde(default = "default_auto_typefix_reverse")]
+    pub reverse: bool,
+    /// 순방향 트리거 시 영단어 매칭(사전 hit)이면 억제 (기본 true, 기존 동작 유지)
+    #[serde(default = "default_auto_typefix_skip_on_english_word")]
+    pub skip_on_english_word: bool,
+    /// 역방향 트리거 시 버퍼의 한글이 모두 완성 음절이면 억제 (기본 true, 기존 동작 유지)
+    #[serde(default = "default_auto_typefix_skip_on_complete_syllable")]
+    pub skip_on_complete_syllable: bool,
+    /// 재트리거 기반 학습형 억제. 동일 입력이 관찰 창 내에 재차 트리거되면
+    /// 오탐 후보로 간주해 해당 순간에도 교정을 억제하고 blacklist에 기록한다. (기본 true)
+    #[serde(default = "default_auto_typefix_rollback_detection")]
+    pub rollback_detection: bool,
+    /// 임시 억제 단어 만료 기간 (시간) — 이 기간 내 수동 확정 안 되면 inactive로 전환 (1~12, 기본 4)
+    #[serde(default = "default_auto_typefix_tentative_expiry_hours")]
+    pub tentative_expiry_hours: u16,
+    /// 재트리거 관찰 창 (초) — 첫 교정 후 이 시간 내에 동일 입력이 재트리거되면 오탐으로 판정 (5~15, 기본 10)
+    #[serde(default = "default_auto_typefix_observation_timeout_secs")]
+    pub observation_timeout_secs: u8,
+    /// 역방향 사용자 사전(`~/.config/unim/typefix-userdict.yaml`) 사용 여부.
+    /// 활성 시 사전 등록 단어는 `eng_word_min_length` 및 내장 영어 사전 검사를 우회하여 즉시 교정.
+    #[serde(default = "default_auto_typefix_user_dict_enabled")]
+    pub user_dict_enabled: bool,
+    /// AutoTypeFix 전체(`enabled`) 토글 단축키 목록 (기본 `["Shift+F8"]`).
+    ///
+    /// 표기 문법은 `[수정자+]* <KeyName>` — 수정자 토큰은 `Ctrl`/`Control`, `Alt`,
+    /// `Super`/`Win`/`Meta`, `Shift` 이며 대소문자·순서 무관이다(예: `Shift+F8`,
+    /// `F10`, `Ctrl+Shift+F7`). `<KeyName>` 은 기존 KeyCode 이름(대소문자 구분).
+    /// 구분자는 `+` 가 정식이며, `+` 가 전혀 없는 표기는 `-` 도 허용한다
+    /// (`Ctrl-Left` = `Ctrl+Left`).
+    ///
+    /// 매칭은 **정확 일치**다: 표기에 등장한 수정자는 눌려 있어야 하고, 등장하지
+    /// 않은 수정자는 눌리면 안 된다. 따라서 수정자 없는 기존 표기(`F10`)는 종전과
+    /// 100% 동일하게 동작하며, 설정에 없는 조합(`Shift+F10` 컨텍스트 메뉴 등)은
+    /// 소비되지 않고 앱으로 통과한다. 비어 있으면 아무 키도 소비하지 않는다.
+    ///
+    /// 파싱 규칙·환경별 상세(Windows TSF/IMM32 는 test 단계 정확-일치 소비로 조합
+    /// 지원, GTK3/4 idle F 키 우회)는 `InputEngine::parse_atf_hotkey` rustdoc 참조.
+    #[serde(default = "default_auto_typefix_toggle_enabled_keys")]
+    pub toggle_enabled_keys: Vec<String>,
+    /// 순방향(영→한) 교정 토글 단축키 목록 (옵트인 — 기본 빈 목록).
+    /// 문법·매칭 규칙은 [`Self::toggle_enabled_keys`] 와 동일.
+    #[serde(default = "default_auto_typefix_toggle_forward_keys")]
+    pub toggle_forward_keys: Vec<String>,
+    /// 역방향(한→영) 교정 토글 단축키 목록 (옵트인 — 기본 빈 목록).
+    /// 문법·매칭 규칙은 [`Self::toggle_enabled_keys`] 와 동일.
+    #[serde(default = "default_auto_typefix_toggle_reverse_keys")]
+    pub toggle_reverse_keys: Vec<String>,
+}
+
+impl Default for AutoTypeFixConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_auto_typefix_enabled(),
+            forward_time_window_ms: default_auto_typefix_forward_time_window_ms(),
+            reverse_time_window_ms: default_auto_typefix_reverse_time_window_ms(),
+            time_window_ms: None,
+            kor_syllable_threshold: default_auto_typefix_kor_syllable_threshold(),
+            eng_word_min_length: default_auto_typefix_eng_word_min_length(),
+            forward: default_auto_typefix_forward(),
+            reverse: default_auto_typefix_reverse(),
+            skip_on_english_word: default_auto_typefix_skip_on_english_word(),
+            skip_on_complete_syllable: default_auto_typefix_skip_on_complete_syllable(),
+            rollback_detection: default_auto_typefix_rollback_detection(),
+            tentative_expiry_hours: default_auto_typefix_tentative_expiry_hours(),
+            observation_timeout_secs: default_auto_typefix_observation_timeout_secs(),
+            user_dict_enabled: default_auto_typefix_user_dict_enabled(),
+            toggle_enabled_keys: default_auto_typefix_toggle_enabled_keys(),
+            toggle_forward_keys: default_auto_typefix_toggle_forward_keys(),
+            toggle_reverse_keys: default_auto_typefix_toggle_reverse_keys(),
+        }
+    }
+}
+
+impl AutoTypeFixConfig {
+    /// 값 범위를 허용 범위로 강제 보정합니다.
+    ///
+    /// CLI/GUI 양쪽에서 중복 범위 검증을 피하기 위해 config 레벨에서 한 번에 clamp.
+    pub fn clamp_ranges(&mut self) {
+        self.kor_syllable_threshold = self.kor_syllable_threshold.clamp(
+            AUTO_TYPEFIX_KOR_THRESHOLD_MIN,
+            AUTO_TYPEFIX_KOR_THRESHOLD_MAX,
+        );
+        self.eng_word_min_length = self.eng_word_min_length.clamp(
+            AUTO_TYPEFIX_ENG_MIN_LENGTH_MIN,
+            AUTO_TYPEFIX_ENG_MIN_LENGTH_MAX,
+        );
+        // 구(舊) 통합 필드가 남아있다면 신규 두 필드 중 기본값인 쪽에 주입.
+        // (역호환: 구 yaml은 forward/reverse를 직접 쓰지 않았으므로 둘 다 기본값이다.)
+        if let Some(legacy) = self.time_window_ms.take() {
+            let fwd_default = default_auto_typefix_forward_time_window_ms();
+            let rev_default = default_auto_typefix_reverse_time_window_ms();
+            if self.forward_time_window_ms == fwd_default {
+                self.forward_time_window_ms = legacy;
+            }
+            if self.reverse_time_window_ms == rev_default {
+                self.reverse_time_window_ms = legacy;
+            }
+        }
+        self.forward_time_window_ms = self
+            .forward_time_window_ms
+            .clamp(AUTO_TYPEFIX_TIME_WINDOW_MIN, AUTO_TYPEFIX_TIME_WINDOW_MAX);
+        self.reverse_time_window_ms = self
+            .reverse_time_window_ms
+            .clamp(AUTO_TYPEFIX_TIME_WINDOW_MIN, AUTO_TYPEFIX_TIME_WINDOW_MAX);
+        self.tentative_expiry_hours = self.tentative_expiry_hours.clamp(
+            AUTO_TYPEFIX_TENTATIVE_EXPIRY_MIN,
+            AUTO_TYPEFIX_TENTATIVE_EXPIRY_MAX,
+        );
+        self.observation_timeout_secs = self.observation_timeout_secs.clamp(
+            AUTO_TYPEFIX_OBSERVATION_TIMEOUT_MIN,
+            AUTO_TYPEFIX_OBSERVATION_TIMEOUT_MAX,
+        );
+    }
+}
+
+fn default_auto_english_enabled() -> bool {
+    false
+}
+fn default_auto_english_trigger_keys() -> Vec<String> {
+    vec!["key:Escape".to_string(), "char:/".to_string()]
+}
+
+/// 자동 영문 모드 전환 설정
+///
+/// 특정 키(기본: `key:Escape`, `char:/`)를 한글 모드에서 입력하면
+/// 조합을 커밋하고 영문 모드로 영구 전환한다. vi/vim 명령 모드 진입,
+/// CLI 도구의 `/` prefix 같은 워크플로우를 편리하게 만든다.
+///
+/// 트리거 키 표기 문법(접두사 기반):
+/// - `"key:<KeyCode>"`  — Functional 매칭. KeyCode 이름 직접 비교.
+///   예: `"key:Escape"`, `"key:Tab"`, `"key:F1"`, `"key:ShiftSemicolon"` (Shift 조합).
+/// - `"key:<mod>+…+<KeyCode>"` — Ctrl/Alt/Super 조합 트리거. modifier 토큰은
+///   `ctrl`(=`control`) / `alt` / `super`(=`win`/`meta`) / `shift`, `'+'` 로 구분.
+///   예: `"key:Ctrl+B"`, `"key:Ctrl+Shift+B"`, `"key:Alt+F1"`, `"key:Super+Space"`.
+///   - modifier(ctrl/alt/super)는 **정확 일치** — 표기에 쓴 것만 필수, 나머지는
+///     눌리지 않아야 발동. `"key:Ctrl+B"` 는 `Ctrl+Alt+B` 에는 발동하지 않는다.
+///   - modifier 이름은 대소문자·순서 무관(`"key:shift+ctrl+B"` == `"key:Ctrl+Shift+B"`),
+///     base KeyCode 이름은 대소문자 구분(`"key:Ctrl+B"` OK, `"key:Ctrl+b"` 는 무시).
+///   - 조합 트리거 발동 시 키는 **항상 앱으로 통과**한다(소비하지 않음) — tmux/wmux
+///     prefix `Ctrl+B` 처럼 앱이 그 키를 그대로 받아야 하는 워크플로우용이다.
+///   - **프런트엔드 제약(현재)**: 문자키 base(`"key:Ctrl+B"`·`"key:Super+Space"`
+///     등)는 XIM·GTK/Qt immodule·GNOME 확장 모든 리눅스 경로에서 동작한다. 반면
+///     (1) F1~F12·화살표·편집키 base(`"key:Alt+F1"` 등)는 GTK3/4 immodule 이
+///     idle 시 해당 keyval 을 엔진에 넘기지 않아 그 경로에선 미발동한다
+///     (Qt·XIM·GNOME 은 동작). (2) Windows 는 TSF/IMM32 가 Ctrl/Alt/Super 조합을
+///     test 단계에서 미소비 통과시켜 엔진에 도달하지 않으므로 조합 트리거가
+///     발동하지 않는다(추후 별도 작업). 전 리눅스 프런트엔드에서 확실히 동작하는
+///     조합은 **문자키 base** 다.
+/// - `"char:<문자>"`    — Character 매칭. 키맵을 거쳐 산출된 char 와 비교.
+///   비-QWERTY 한국어 레이아웃(예: 세벌식390) 에서도 산출 문자가 같으면 발동.
+///   예: `"char:/"`, `"char:,"`, `"char:?"`. shift 무관 — `'/'` 와 `'?'` 를
+///   구분하려면 둘 다 등록. (Ctrl/Alt/Super 조합 중에는 매칭하지 않음.)
+/// - 무접두사(legacy)   — 종전 표기 유지. `"Escape"` / `"Slash"` / `"ShiftSemicolon"`
+///   등은 자동으로 Functional 로 흡수되어 100% 호환. ('+' 조합 문법은 `key:` 전용.)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoEnglishConfig {
+    /// 활성화 여부 (기본 false, opt-in)
+    #[serde(default = "default_auto_english_enabled")]
+    pub enabled: bool,
+    /// 자동 영문 전환을 유발하는 트리거 키 표기 목록.
+    /// 표기 문법은 위 docstring 참조 (`key:` / `char:` / 무접두사 legacy).
+    #[serde(default = "default_auto_english_trigger_keys")]
+    pub trigger_keys: Vec<String>,
+}
+
+impl Default for AutoEnglishConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_auto_english_enabled(),
+            trigger_keys: default_auto_english_trigger_keys(),
+        }
+    }
+}
+
+/// `word_mode_apps` 기본값 — Smart 확정 단위 게이트가 이 목록의 프로세스 실행 파일명
+/// (정확일치)만 단어 모드로 켠다. 플랫폼 분기: Windows 는 `winword.exe`(MS Word)만
+/// seed, 그 외(리눅스 등)는 빈 목록이다.
+///
+/// `winword.exe` 는 리눅스에서 실행될 수 없어 seed 해봐야 죽은 항목이고, Smart 게이트가
+/// 매 앱마다 무의미하게 비교하게 만든다. 따라서 리눅스 기본값은 빈 목록으로 두고,
+/// 필요한 사용자만 config `word_mode_apps` 로 명시 추가한다(빈 목록이어도 Smart 는
+/// Syllable 과 동일 동작). wmux(xterm.js/Blink)는 양 플랫폼 모두 제외됨: 역방향 자동교정이
+/// 음절모드에서 synth 라우팅(sink_asymmetric, OnTestKeyDown 미발화 감지)으로 동작
+/// 확인돼(device-QA PASS) 더는 단어 모드가 필요 없다.
+fn default_word_mode_apps() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        vec!["winword.exe".to_string()]
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Vec::new()
+    }
+}
+
+/// 한국어 엔진 설정
+///
+/// Phase 8에서 `layout` 필드가 enum에서 문자열로 통합됨. 이전의 `custom_layout`
+/// 우회 필드는 제거되었고, 레거시 YAML(`layout: Dubeolsik` / `custom_layout: X`)은
+/// `Deserialize` 구현에서 자동 흡수된다.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, from = "KoreanConfigCompat")]
+pub struct KoreanConfig {
+    /// 한국어 자판 프로필 이름(레지스트리 키). 기본값 `ko_2bulstd`.
+    pub layout: KoreanLayout,
+    /// 활성 규칙 세트 이름 목록 (자판 프로필 v1 — `docs/archive/plans/LAYOUT_PROFILE_V1.md` §3.5).
+    ///
+    /// engine 측 `LayoutProfile.active_rule_sets`(Option<Vec<String>>) 의미와 일치:
+    /// - `None` = 미설정. 프로필 기본값 사용(각 `rule_sets.<name>.active` 그대로).
+    /// - `Some(list)` = 명시적 활성 목록. 목록에 있는 이름만 active, 나머지 강제 off.
+    /// - `Some(vec![])` = 사용자가 모든 규칙 세트를 끔(All OFF). 프로필 기본값으로
+    ///   되돌리지 **않으며** 이 의도가 그대로 유지된다.
+    ///
+    /// `None`은 `serde(skip_serializing_if = "Option::is_none")`로 YAML에서 필드 자체가
+    /// 누락된다(기본 상태에서 config.yaml이 깔끔). `Some(vec![])`은 `[]`로 명시 저장.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_rule_sets: Option<Vec<String>>,
+
+    /// 키맵(자판 프로필)별 `active_rule_sets` 스냅샷 캐시 — 사용자 편의용.
+    ///
+    /// GTK 설정에서 자판을 전환할 때 이전 자판의 활성 룰셋 ON/OFF 상태를 잃지 않도록
+    /// 키맵 이름을 키로 매핑해 보존한다. 기본값은 빈 맵 (캐시 미사용 → 프로필 기본값).
+    ///
+    /// - **Key**: `effective_layout_name()` (정규화된 자판 이름, 예: `ko_2bulstd`).
+    /// - **Value**: 그 자판에서 사용자가 마지막으로 설정한 active rule_sets 이름 목록.
+    ///   빈 vec(`[]`)도 유효한 의도("모두 OFF") — `active_rule_sets: Some(vec![])` 의미와 동일.
+    ///
+    /// daemon은 본 캐시를 읽지 **않는다** — 활성 자판의 효과는 `active_rule_sets` 만 결정.
+    /// GUI가 자판 전환 시 본 캐시에서 새 자판의 값을 꺼내 `active_rule_sets`로 복원한다.
+    ///
+    /// `BTreeMap`은 직렬화 순서 안정성 (자판명 알파벳 순서). 빈 맵일 때 YAML에서 누락.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub layout_rule_sets: BTreeMap<String, Vec<String>>,
+
+    /// 모아치기 — 양방향 자모 결합 사용자 재정의.
+    ///
+    /// `None` = 자판 프로필 기본값 사용(`supports_moachigi=true` 자판의 `bidirectional_combine`).
+    /// `Some(true/false)` = 사용자가 프로필 기본값을 재정의.
+    /// `supports_moachigi=false` 자판에서는 무시된다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bidirectional_combine: Option<bool>,
+
+    /// 모아치기 — 동시 입력 시간 (밀리초).
+    ///
+    /// `None` = OPT-IN OFF (미설정). GUI/CLI 활성화 토글 시 60ms 기본값으로 채운다.
+    /// `Some(0)` = 동시 입력 OFF. `Some(N)` = N ms 이내에 들어온 키를 한 음절로 모아 처리.
+    /// 유효 범위: 10-200ms (0=OFF, 1-9·201+ 은 거부). 권장 기본값 60ms.
+    /// `supports_moachigi=false` 자판에서는 무시된다.
+    /// `bidirectional_combine`과 독립적으로 동작 (Phase 5a~: 두 옵션 분리).
+    /// InputEngine 레벨 ChordBuffer로 구현됨 (idle flush + force_flush 패턴).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chord_window_ms: Option<u16>,
+
+    /// 조합 확정 단위 — 음절/단어/스마트 (기본 `Smart`).
+    ///
+    /// `Word` 면 엔진이 `accumulate_word` 를 켜 단어 경계까지 preedit 을 누적한다
+    /// (자동교정 substrate). 레거시 `word_commit: true` config 는 `KoreanConfigCompat`
+    /// 브리지에서 `commit_unit` 미지정 시 `Word` 로, 그 외 미지정은 기본값(`Smart`)으로
+    /// 승격된다. TSF 게이트가 이 값을 앱별 단어모드 desired 판정에 사용한다.
+    #[serde(default)]
+    pub commit_unit: CommitUnit,
+
+    /// 단어 모드(단어 단위 조합) 대상 앱 목록 — 프로세스 실행 파일명 정확일치.
+    ///
+    /// `Smart` 확정 단위 게이트가 이 목록에 정확히 일치하는 포그라운드 앱만 단어 모드로
+    /// 켠다(그 외는 음절 단위). Windows TSF 는 프로세스 실행 파일명, Linux `unim-daemon`
+    /// 은 `desired_word_mode` 게이트가 app_id(대소문자 무시)로 비교하며 터미널·XIM 은 제외.
+    /// 기본값 `["winword.exe"]`. wmux 는 역방향 음절모드 synth 라우팅 동작 확인 후 제외됨.
+    /// 앱 호환을 코드 릴리스와 분리(config.yaml/CLI 로 편집, `maybe_reload_config` 핫리로드).
+    #[serde(default = "default_word_mode_apps")]
+    pub word_mode_apps: Vec<String>,
+}
+
+impl Default for KoreanConfig {
+    fn default() -> Self {
+        Self {
+            layout: KOREAN_LAYOUT_DUBEOLSIK.to_string(),
+            active_rule_sets: None,
+            layout_rule_sets: BTreeMap::new(),
+            bidirectional_combine: None,
+            chord_window_ms: None,
+            commit_unit: CommitUnit::default(),
+            word_mode_apps: default_word_mode_apps(),
+        }
+    }
+}
+
+impl KoreanConfig {
+    /// 실제 로드할 프로필 이름을 반환. 단순히 `layout`의 clone이며 정식 이름으로
+    /// 정규화(`normalize_korean_layout_name`)를 거친다. 레지스트리의 별칭 처리도
+    /// 있어 두 단계 모두 안전하다.
+    pub fn effective_layout_name(&self) -> String {
+        normalize_korean_layout_name(&self.layout)
+    }
+
+    /// `chord_window_ms` 값의 유효성 검증.
+    ///
+    /// - `None` = OK (미설정, OPT-IN OFF)
+    /// - `Some(0)` = OK (명시적 OFF)
+    /// - `Some(10..=200)` = OK (유효 범위)
+    /// - `Some(1..=9)` = Err (너무 작음 — 입력 지연 유발)
+    /// - `Some(201..)` = Err (너무 큼)
+    pub fn validate_chord_window_ms(value: Option<u16>) -> Result<(), String> {
+        match value {
+            None | Some(0) => Ok(()),
+            Some(n) if (10..=200).contains(&n) => Ok(()),
+            Some(n) if n < 10 => Err(format!(
+                "chord_window_ms {n}은 범위를 벗어납니다. 유효값: 0(OFF) 또는 10-200ms"
+            )),
+            Some(n) => Err(format!(
+                "chord_window_ms {n}은 범위를 벗어납니다. 유효값: 0(OFF) 또는 10-200ms"
+            )),
+        }
+    }
+
+    /// 한국어 자판 전환을 캐시 보존/복원과 함께 수행한다.
+    ///
+    /// **이 함수는 GUI 토글이 만드는 사용자 의도를 자판 전환 직후에도 유지하는
+    /// 데에 핵심**이다 — 이전 자판의 `active_rule_sets`(Some)을 캐시에 저장하고,
+    /// 새 자판의 캐시된 값(있으면)을 복원한다.
+    ///
+    /// - **이전 자판**: `active_rule_sets == Some(...)`이면 그 자판 이름으로
+    ///   `layout_rule_sets`에 보존. `None` (프로필 기본값)은 캐시하지 않는다 —
+    ///   "기본값 사용" 의도가 의미상 캐시 hit과 구별되어야 하기 때문.
+    /// - **새 자판**: `layout_rule_sets[new_layout]`이 존재하면 그 값으로
+    ///   `active_rule_sets` 복원, 없으면 `None`(프로필 기본값).
+    ///
+    /// 호출자가 새 프로필의 유효한 rule_set 이름 슬라이스를 알고 있으면
+    /// `valid_rule_set_names`에 넘기면 stale 이름을 자동 정리한다 (예: 사용자가
+    /// 캐시 후 프로필 JSON을 편집해 일부 rule_set을 제거한 경우). `None`이면 필터링
+    /// 생략 — 다음 GUI/CLI 조작 때 정리된다.
+    ///
+    /// 같은 자판으로의 "전환"은 의미가 없으므로 무시한다 (캐시 변동 없음).
+    pub fn switch_layout(&mut self, new_layout: &str, valid_rule_set_names: Option<&[String]>) {
+        let new_norm = normalize_korean_layout_name(new_layout);
+        let old_norm = self.effective_layout_name();
+        if old_norm == new_norm {
+            return;
+        }
+
+        // 1. 이전 자판의 명시 상태(Some) 보존. None은 캐시하지 않음.
+        if let Some(active) = self.active_rule_sets.as_ref() {
+            self.layout_rule_sets.insert(old_norm, active.clone());
+        }
+
+        // 2. 자판 변경.
+        self.layout = new_norm.clone();
+
+        // 3. 새 자판의 캐시 복원 (없으면 None → 프로필 기본값 사용).
+        self.active_rule_sets = self.layout_rule_sets.get(&new_norm).cloned();
+
+        // 4. stale rule_set 이름 정리 (호출자가 valid 집합 제공한 경우).
+        if let (Some(list), Some(valid)) = (self.active_rule_sets.as_mut(), valid_rule_set_names) {
+            list.retain(|n| valid.iter().any(|v| v == n));
+        }
+    }
+
+    /// 현재 자판의 `active_rule_sets` 값을 캐시(`layout_rule_sets`)에 동기화한다.
+    /// 사용자 토글 또는 CLI `set` 직후에 호출.
+    ///
+    /// - `Some(list)` → `layout_rule_sets[current_layout] = list` (덮어쓰기).
+    /// - `None` (프로필 기본값으로 재설정 의도) → 해당 자판의 캐시 entry 제거.
+    ///   (캐시가 남아있으면 다음 자판 전환 시 stale Some으로 복원되어 사용자 의도와
+    ///   어긋난다.)
+    pub fn cache_active_rule_sets(&mut self) {
+        let layout = self.effective_layout_name();
+        match self.active_rule_sets.as_ref() {
+            Some(list) => {
+                self.layout_rule_sets.insert(layout, list.clone());
+            }
+            None => {
+                self.layout_rule_sets.remove(&layout);
+            }
+        }
+    }
+}
+
+/// 역직렬화 호환 레이어.
+///
+/// 아래 3가지 형태를 모두 `KoreanConfig`로 승격한다:
+/// - 현재 포맷 (`layout: "ko_2bulstd"`, `active_rule_sets: [...]`)
+/// - 레거시 Phase 4b (`layout: "Dubeolsik"`, `custom_layout: "X"`)
+/// - 레거시 Phase 4a (`layout: "Dubeolsik"`)
+/// - 레거시 pre-Phase 4 (`layout: Dubeolsik` as bare YAML — serde yaml도 String으로 읽음)
+#[derive(Deserialize)]
+#[serde(default)]
+struct KoreanConfigCompat {
+    layout: String,
+    preedit_johab: bool,
+    word_commit: bool,
+    /// `serde(default)` + `Option<Vec<String>>` — YAML에 키 자체가 없으면 `None`,
+    /// 있으면 `Some(...)` (빈 list `[]` 포함, 이는 "모두 OFF" 의도).
+    #[serde(default)]
+    active_rule_sets: Option<Vec<String>>,
+    /// 키맵별 active_rule_sets 캐시 (GTK GUI 사용자 편의용).
+    #[serde(default)]
+    layout_rule_sets: BTreeMap<String, Vec<String>>,
+    /// 레거시 override 필드 — Some이면 `layout`을 덮어씀. 본 통합 이후 제거됨.
+    #[serde(default)]
+    custom_layout: Option<String>,
+    /// 모아치기 — 양방향 자모 결합 사용자 재정의.
+    #[serde(default)]
+    bidirectional_combine: Option<bool>,
+    /// 모아치기 — 동시 입력 시간 (ms). 0=OFF. N ms 이내 키를 한 음절로 묶음 처리.
+    #[serde(default)]
+    chord_window_ms: Option<u16>,
+    /// 조합 확정 단위. `None` = 미지정(레거시 `word_commit` 브리지 대상).
+    /// `Some(_)` = 명시 설정(브리지보다 우선).
+    #[serde(default)]
+    commit_unit: Option<CommitUnit>,
+    /// 단어 모드 앱 목록 (정확일치). 미지정 → 기본값(winword.exe).
+    #[serde(default = "default_word_mode_apps")]
+    word_mode_apps: Vec<String>,
+}
+
+impl Default for KoreanConfigCompat {
+    fn default() -> Self {
+        Self {
+            layout: KOREAN_LAYOUT_DUBEOLSIK.to_string(),
+            preedit_johab: false,
+            word_commit: false,
+            active_rule_sets: None,
+            layout_rule_sets: BTreeMap::new(),
+            custom_layout: None,
+            bidirectional_combine: None,
+            chord_window_ms: None,
+            commit_unit: None,
+            word_mode_apps: default_word_mode_apps(),
+        }
+    }
+}
+
+impl From<KoreanConfigCompat> for KoreanConfig {
+    fn from(c: KoreanConfigCompat) -> Self {
+        let layout = match c.custom_layout {
+            Some(ref s) if !s.is_empty() => s.clone(),
+            _ => c.layout,
+        };
+        // 확정 단위 브리지: 명시 `commit_unit` 우선, 미지정이면 레거시
+        // `word_commit: true` 를 `Word` 로 승격(구 config 의도 보존), 그 외 기본값.
+        let commit_unit = match c.commit_unit {
+            Some(u) => u,
+            None if c.word_commit => CommitUnit::Word,
+            None => CommitUnit::default(),
+        };
+        // 리눅스 마이그레이션: 구 버전은 전 플랫폼에서 word_mode_apps 를 ["winword.exe"]
+        // 로 seed 했다. 리눅스에선 winword.exe 가 실행될 수 없어 무의미하므로, 값이 정확히
+        // ["winword.exe"] 단일 원소면 사용자 의도가 아닌 구 기본값 잔재로 보고 빈 목록으로
+        // 치환한다. Windows 는 winword.exe 가 실제 대상이므로 보존한다. 사용자가 명시한
+        // 다른 목록(빈 목록 [] 이나 winword.exe 를 포함한 복수 항목)은 그대로 둔다.
+        #[cfg(not(target_os = "windows"))]
+        let word_mode_apps = if c.word_mode_apps.len() == 1 && c.word_mode_apps[0] == "winword.exe"
+        {
+            Vec::new()
+        } else {
+            c.word_mode_apps
+        };
+        #[cfg(target_os = "windows")]
+        let word_mode_apps = c.word_mode_apps;
+        Self {
+            layout: normalize_korean_layout_name(&layout),
+            active_rule_sets: c.active_rule_sets,
+            layout_rule_sets: c.layout_rule_sets,
+            bidirectional_combine: c.bidirectional_combine,
+            chord_window_ms: c.chord_window_ms,
+            commit_unit,
+            word_mode_apps,
+        }
+    }
+}
+
+/// 영어 엔진 설정
+///
+/// Phase 9에서 `layout` 필드가 enum → String. 레거시 YAML(`layout: Qwerty`)은
+/// `EnglishConfigCompat`을 거쳐 자동 정규화.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, from = "EnglishConfigCompat")]
+pub struct EnglishConfig {
+    /// 영어 키보드 레이아웃 프로필 이름(레지스트리 키). 기본값 `qwerty`.
+    pub layout: EnglishLayout,
+    /// 다이렉트 입력 선호
+    ///
+    /// 예약 필드 — 현재 소비처 없음(v0.4.x, UX-SHARED-04). 제거는 config
+    /// 스키마 변경(엔진·GUI·CLI 3지점 동시 수정 필요)이므로 마이너 릴리스에서
+    /// 처리한다.
+    pub preferred_direct: bool,
+}
+
+impl Default for EnglishConfig {
+    fn default() -> Self {
+        Self {
+            layout: ENGLISH_LAYOUT_QWERTY.to_string(),
+            preferred_direct: true,
+        }
+    }
+}
+
+/// 역직렬화 호환 레이어 — 레거시 enum 이름(`Qwerty` 등)을 소문자 내장 이름으로 승격.
+#[derive(Deserialize)]
+#[serde(default)]
+struct EnglishConfigCompat {
+    layout: String,
+    preferred_direct: bool,
+}
+
+impl Default for EnglishConfigCompat {
+    fn default() -> Self {
+        Self {
+            layout: ENGLISH_LAYOUT_QWERTY.to_string(),
+            preferred_direct: true,
+        }
+    }
+}
+
+impl From<EnglishConfigCompat> for EnglishConfig {
+    fn from(c: EnglishConfigCompat) -> Self {
+        Self {
+            layout: normalize_english_layout_name(&c.layout),
+            preferred_direct: c.preferred_direct,
+        }
+    }
+}
+
+/// 앱별 기본 모드 규칙
+///
+/// 특정 앱이 포커스를 받을 때 자동으로 설정할 입력 모드입니다.
+/// 예: 터미널은 항상 영문, 한글 에디터는 항상 한글
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AppRule {
+    /// 앱 패턴 (window_id 또는 client_name에 대한 부분 문자열 매칭)
+    pub app_pattern: String,
+    /// 해당 앱의 기본 입력 카테고리
+    pub default_category: InputCategory,
+}
+
+/// 엔진 설정
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EngineConfig {
+    /// 기본 입력 카테고리
+    pub default_category: InputCategory,
+    /// 입력 모드 공유 방식
+    pub mode_sharing: ModeSharingMode,
+    /// 한국어 설정
+    pub korean: KoreanConfig,
+    /// 영어 설정
+    pub english: EnglishConfig,
+    /// 한/영 전환 키 목록 (KeyCode 이름)
+    pub toggle_keys: Vec<String>,
+    /// 한자/특수문자 키 목록 (KeyCode 이름)
+    pub hanja_keys: Vec<String>,
+    /// 앱별 기본 모드 규칙
+    pub app_rules: Vec<AppRule>,
+    /// 자동 오타 교정 (AutoTypeFix) 설정
+    pub auto_typefix: AutoTypeFixConfig,
+    /// 특정 키 입력 시 자동으로 영문 모드로 전환하는 설정
+    pub auto_english: AutoEnglishConfig,
+    /// 한/영 전환 시 짧은 비프음으로 현재 모드를 알린다 (접근성, 기본 false).
+    ///
+    /// 시각장애 사용자가 화면 없이도 토글 후 현재 모드(한글/영문)를 소리 높낮이로
+    /// 확인할 수 있게 한다. 한글 모드는 높은 음(880Hz), 영문 모드는 낮은 음(440Hz)으로
+    /// 차등한다. Windows·Linux 모두 지원 — Windows 는 TSF lang_bar, Linux 는
+    /// unim-daemon 이 paplay/pw-cat/aplay 로 합성 WAV 를 재생한다. 기본 false 로 현행
+    /// 무음 동작을 바이트동일 보존한다.
+    /// (능동 스크린리더 통지 NotifyWinEvent 는 본 옵션과 무관하게 항상 발생.)
+    #[serde(default)]
+    pub toggle_announce_beep: bool,
+
+    /// 조합키 자동반복 억제 — 조합/토글 키를 홀드했을 때 OS 자동반복 이벤트를
+    /// 무시한다 (접근성, 지체장애, 기본 false).
+    ///
+    /// 켜지면 키를 누르고 있을 때 반복 발생하는 자모 연타·한/영 토글 진동을 막아
+    /// 한 번의 눌림만 처리한다. Windows TSF 는 OnKeyDown/OnTestKeyDown 의 lParam
+    /// bit30(이전 키 상태=반복)으로 반복을 식별한다. 편집키(백스페이스/방향)와
+    /// 영문 직접입력의 자동반복은 영향받지 않고 그대로 유지된다.
+    /// 기본 false 로 현행 동작을 바이트동일 보존한다.
+    #[serde(default)]
+    pub ignore_key_repeat: bool,
+}
+
+impl Default for EngineConfig {
+    fn default() -> Self {
+        Self {
+            default_category: InputCategory::default(),
+            mode_sharing: ModeSharingMode::default(),
+            korean: KoreanConfig::default(),
+            english: EnglishConfig::default(),
+            toggle_keys: vec!["Korean".to_string(), "RightAlt".to_string()],
+            hanja_keys: vec!["Hanja".to_string(), "F9".to_string()],
+            app_rules: Vec::new(),
+            auto_typefix: AutoTypeFixConfig::default(),
+            auto_english: AutoEnglishConfig::default(),
+            toggle_announce_beep: false,
+            ignore_key_repeat: false,
+        }
+    }
+}
+
+/// UNIM 전체 설정
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    /// 엔진 설정
+    pub engine: EngineConfig,
+    /// 마지막 로드 시점의 파일 수정 시간 (직렬화 제외)
+    #[serde(skip)]
+    pub last_modified: Option<SystemTime>,
+    /// 마지막으로 파일 시스템을 확인한 시간 (Throttling용)
+    #[serde(skip)]
+    pub last_checked: Option<SystemTime>,
+}
+
+impl Config {
+    /// 새로운 기본 설정을 생성합니다.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 기본 설정 파일 경로를 반환합니다.
+    ///
+    /// - Linux: `~/.config/unim/config.yaml`
+    /// - macOS: `~/Library/Application Support/unim/config.yaml`
+    /// - Windows: `%APPDATA%\unim\config.yaml`
+    pub fn default_config_path() -> Option<PathBuf> {
+        crate::paths::config_dir().map(|p| p.join("unim").join("config.yaml"))
+    }
+
+    /// 기본 경로에서 설정을 로드합니다.
+    ///
+    /// 설정 파일이 없거나 파싱 실패 시:
+    /// - 기본 설정을 생성하고 파일로 저장을 시도합니다.
+    /// - 저장 실패 시 (퍼미션 등) 로그로 해결 방법을 안내합니다.
+    ///
+    /// 손상 복구가 일어났는지 여부까지 알아야 하는 호출자(마이그레이션 등)는
+    /// [`Self::load_from_default_path_with_status`]를 대신 쓸 것 — 이 함수의
+    /// 시그니처는 기존 호출자를 위해 그대로 유지한다.
+    pub fn load_from_default_path() -> Self {
+        Self::load_from_default_path_with_status().0
+    }
+
+    /// [`Self::load_from_default_path`]와 동일하게 로드하되, 손상 복구가
+    /// 발생했는지 상태로 함께 반환합니다.
+    ///
+    /// GAP-config-06/M-11: v2 마이그레이션 등이 `Config::load_from_default_path()`의
+    /// 결과만 보고 "정상 마이그레이션"으로 로그를 남기면, config.yaml이 손상돼
+    /// 기본값으로 초기화됐다는 사실 자체가 영구히 사라진다. 기존 함수의 시그니처를
+    /// 바꾸지 않기 위해(다른 배치가 동시에 수정하는 호출부 파손 방지) 새 함수를
+    /// 추가하는 방식으로 노출한다.
+    pub fn load_from_default_path_with_status() -> (Self, ConfigLoadStatus) {
+        let Some(path) = Self::default_config_path() else {
+            eprintln!("[UNIM] 설정 디렉터리 경로를 찾을 수 없습니다.");
+            return (Self::default(), ConfigLoadStatus::Fresh);
+        };
+
+        match Self::load_from_path(&path) {
+            Ok(config) => (config, ConfigLoadStatus::Fresh),
+            Err(e) => {
+                let status = Self::classify_load_error(&e);
+                // 오류 원인에 따라 복구 시도
+                let config = Self::handle_load_error(&path, e);
+                (config, status)
+            }
+        }
+    }
+
+    /// 로드 오류가 "손상 복구"인지 "정상적인 최초 실행"인지 분류합니다.
+    ///
+    /// 파일 부재(최초 실행)나 퍼미션 문제는 손상이 아니다 — 실제로 있던 설정이
+    /// 깨져 기본값으로 대체된 경우에만 `Recovered`로 분류한다.
+    fn classify_load_error(error: &ConfigError) -> ConfigLoadStatus {
+        match error {
+            ConfigError::ParseError(msg) => ConfigLoadStatus::Recovered {
+                reason: msg.clone(),
+            },
+            ConfigError::IoError(msg)
+                if !msg.contains("No such file")
+                    && !msg.contains("찾을 수 없")
+                    && !Self::is_permission_error(msg) =>
+            {
+                ConfigLoadStatus::Recovered {
+                    reason: msg.clone(),
+                }
+            }
+            _ => ConfigLoadStatus::Fresh,
+        }
+    }
+
+    /// 설정 로드 오류를 처리하고 복구를 시도합니다.
+    fn handle_load_error(path: &PathBuf, error: ConfigError) -> Self {
+        let mut default_config = Self::default();
+
+        match &error {
+            ConfigError::IoError(msg) => {
+                if msg.contains("No such file") || msg.contains("찾을 수 없") {
+                    // 파일이 없음 - 새로 생성
+                    eprintln!(
+                        "[UNIM] 설정 파일이 없습니다. 기본 설정을 생성합니다: {:?}",
+                        path
+                    );
+                } else if Self::is_permission_error(msg) {
+                    // 퍼미션 문제 (Linux "Permission denied" / Windows "Access is denied" /
+                    // "os error 5"). default 를 디스크에 덮어쓰려는 시도(아래)를 건너뛰어
+                    // AppContainer(스티커 메모 등)에서 무의미한 쓰기 실패 로그를 막는다.
+                    Self::log_permission_error(path);
+                    return default_config;
+                } else {
+                    eprintln!(
+                        "[UNIM] 설정 파일 읽기 오류: {}. 기본 설정을 사용합니다.",
+                        msg
+                    );
+                }
+            }
+            ConfigError::ParseError(msg) => {
+                // 파싱 오류 - 기본 설정으로 덮어쓰기 전에 손상 파일을 백업해
+                // 자판·토글키·앱별 규칙 등 사용자 커스터마이징이 영구 소실되지
+                // 않게 한다(GAP-config-durability-and-write-races-01).
+                eprintln!(
+                    "[UNIM] 설정 파일 형식 오류: {}. 기본 설정으로 복구합니다.",
+                    msg
+                );
+                Self::backup_corrupt_config(path);
+            }
+            _ => {
+                eprintln!(
+                    "[UNIM] 설정 로드 오류: {:?}. 기본 설정을 사용합니다.",
+                    error
+                );
+            }
+        }
+
+        // 기본 설정 저장 시도
+        match default_config.save_to_path(path) {
+            Ok(_) => {
+                eprintln!("[UNIM] 기본 설정 파일을 생성했습니다: {:?}", path);
+                // 저장 후 mtime 갱신
+                default_config.last_modified = Self::get_config_mtime(path);
+            }
+            Err(save_err) => {
+                if let ConfigError::IoError(msg) = &save_err {
+                    if Self::is_permission_error(msg) {
+                        Self::log_permission_error(path);
+                    } else {
+                        eprintln!("[UNIM] 설정 파일 저장 실패: {}", msg);
+                    }
+                }
+            }
+        }
+
+        default_config
+    }
+
+    /// IO 오류 메시지가 권한 거부인지 판정합니다.
+    ///
+    /// OS/로캘별 문자열을 모두 커버:
+    /// - Linux/macOS: `Permission denied`
+    /// - Windows(영문): `Access is denied`
+    /// - Windows(raw): `os error 5`
+    /// - 한국어 로캘: `권한`
+    fn is_permission_error(msg: &str) -> bool {
+        msg.contains("Permission denied")
+            || msg.contains("Access is denied")
+            || msg.contains("os error 5")
+            || msg.contains("권한")
+    }
+
+    /// 퍼미션 오류 시 해결 방법을 로그로 안내합니다.
+    fn log_permission_error(path: &PathBuf) {
+        eprintln!("[UNIM] ⚠️ 설정 파일 접근 권한 오류: {:?}", path);
+        eprintln!("[UNIM] 다음 명령어로 해결할 수 있습니다:");
+        if let Some(parent) = path.parent() {
+            eprintln!("[UNIM]   mkdir -p {:?} && chmod 755 {:?}", parent, parent);
+        }
+        eprintln!("[UNIM]   touch {:?} && chmod 644 {:?}", path, path);
+        eprintln!("[UNIM] 또는 관리자 권한으로 설정 도구를 실행하세요:");
+        eprintln!("[UNIM]   unim-cli config");
+    }
+
+    /// 손상 백업을 몇 개까지 남길지. 이 개수를 넘으면 오래된 것부터 정리한다
+    /// (검증자 지적 MINOR — 백업 후 기본값 저장이 계속 실패하는 환경에서 기동할
+    /// 때마다 `.corrupt-*` 가 무한히 쌓이는 문제).
+    const MAX_CORRUPT_BACKUPS: usize = 3;
+
+    /// 파싱에 실패한 설정 파일을 `<path>.corrupt-<unix epoch 나노초>` 로 백업합니다.
+    ///
+    /// `rename`이 아니라 `copy`를 쓴다 — 원본이 사라져도 다음 로직(기본값 저장)이
+    /// 그대로 진행되게 하기 위함. 백업 자체가 실패해도(디스크풀 등) 로그만 남기고
+    /// 복구 절차를 막지 않는다 — 백업 실패로 기동을 막으면 새 BLOCKER가 된다.
+    ///
+    /// 타임스탬프는 초가 아니라 나노초 단위 — 같은 초에 재기동(핸들러가 반복
+    /// 실패하는 읽기전용 설정 디렉터리 등)해도 직전 백업을 덮어써 잃지 않는다.
+    /// 백업 성공 시 `prune_corrupt_backups`로 오래된 백업을 정리해 무한 누적을 막는다.
+    fn backup_corrupt_config(path: &PathBuf) {
+        let ts = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let backup_path = path.with_extension(format!("yaml.corrupt-{}", ts));
+        match fs::copy(path, &backup_path) {
+            Ok(_) => {
+                eprintln!("[UNIM] 손상된 설정 파일을 백업했습니다: {:?}", backup_path);
+                Self::prune_corrupt_backups(path);
+            }
+            Err(e) => {
+                eprintln!("[UNIM] 손상된 설정 파일 백업 실패(계속 진행): {}", e);
+            }
+        }
+    }
+
+    /// `<path>.corrupt-*` 백업이 `MAX_CORRUPT_BACKUPS` 개를 넘으면 오래된 것부터
+    /// (mtime 기준) 지운다. 정리 자체가 실패해도(권한 등) 로그만 남기고 기동을
+    /// 막지 않는다 — 이 함수는 어떤 경우에도 에러를 전파하지 않는다.
+    fn prune_corrupt_backups(path: &Path) {
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            return;
+        };
+        let prefix = format!("{file_name}.corrupt-");
+
+        let Ok(entries) = fs::read_dir(parent) else {
+            return;
+        };
+        let mut backups: Vec<(PathBuf, SystemTime)> = entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name();
+                let name = name.to_str()?;
+                if !name.starts_with(&prefix) {
+                    return None;
+                }
+                let modified = e.metadata().ok()?.modified().ok()?;
+                Some((e.path(), modified))
+            })
+            .collect();
+
+        if backups.len() <= Self::MAX_CORRUPT_BACKUPS {
+            return;
+        }
+
+        backups.sort_by_key(|(_, modified)| *modified);
+        let excess = backups.len() - Self::MAX_CORRUPT_BACKUPS;
+        for (old_path, _) in backups.into_iter().take(excess) {
+            if let Err(e) = fs::remove_file(&old_path) {
+                eprintln!(
+                    "[UNIM] 오래된 손상 백업 정리 실패(계속 진행): {:?} ({})",
+                    old_path, e
+                );
+            }
+        }
+    }
+
+    /// 지정된 경로에서 설정을 로드합니다.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - 설정 파일 경로
+    ///
+    /// # Returns
+    ///
+    /// 로드된 설정 또는 오류
+    pub fn load_from_path(path: &PathBuf) -> Result<Self, ConfigError> {
+        let metadata = fs::metadata(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
+        let mtime = metadata.modified().ok();
+
+        let content = fs::read_to_string(path).map_err(|e| ConfigError::IoError(e.to_string()))?;
+        let mut config: Self =
+            serde_yaml::from_str(&content).map_err(|e| ConfigError::ParseError(e.to_string()))?;
+        // 구(舊) time_window_ms 필드 역호환: forward/reverse에 주입 + 범위 clamp.
+        config.engine.auto_typefix.clamp_ranges();
+        config.last_modified = mtime;
+        config.last_checked = Some(SystemTime::now());
+        Ok(config)
+    }
+
+    /// 설정을 기본 경로에 저장합니다.
+    pub fn save_to_default_path(&self) -> Result<(), ConfigError> {
+        let path = Self::default_config_path()
+            .ok_or_else(|| ConfigError::IoError("설정 디렉터리를 찾을 수 없습니다.".to_string()))?;
+        self.save_to_path(&path)
+    }
+
+    /// 설정을 지정된 경로에 저장합니다.
+    ///
+    /// `crate::atomic_io::atomic_write`로 같은 디렉터리에 프로세스 고유 tmp
+    /// 파일을 쓴 뒤 `rename`으로 교체하는 원자적 저장을 사용한다
+    /// (`typefix_userdict.rs`/`typefix_blacklist.rs`/`unim-keymap-common`의
+    /// 사용자 키맵 저장과 동일한 공유 헬퍼). `fs::write`를 대상 경로에 직접
+    /// 쓰면 O_TRUNC로 먼저 파일을 비우므로, 저장 도중 전원 단절·OOM-kill
+    /// 등이 발생하면 config.yaml이 빈 파일/잘린 YAML로 남아 다음 기동 시
+    /// 전체 설정이 소실된다. tmp 파일명이 고정이면 두 프로세스(데몬 + 설정
+    /// GUI 등)가 동시에 저장할 때 서로의 tmp/rename과 경합할 수 있어, tmp
+    /// 이름에 PID+나노초를 넣어 프로세스별로 고유하게 만든다
+    /// (GAP-config-durability-and-write-races-01). 대상이 심볼릭 링크(dotfile
+    /// 매니저 등)면 링크를 따라가 실제 파일 위치에 써서 링크 자체가
+    /// 일반 파일로 대체되지 않게 한다.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - 저장할 경로
+    pub fn save_to_path(&self, path: &Path) -> Result<(), ConfigError> {
+        let content =
+            serde_yaml::to_string(self).map_err(|e| ConfigError::SerializeError(e.to_string()))?;
+
+        crate::atomic_io::atomic_write(path, content).map_err(|e| ConfigError::IoError(e.to_string()))
+    }
+
+    /// 방금 저장한 파일의 mtime 을 `last_modified` 스냅샷에 반영합니다.
+    ///
+    /// `save_to_path`/`save_to_default_path` 는 `last_modified` 를 갱신하지 않는다.
+    /// 그래서 저장 직후 `reload_if_changed()` 를 걸면 **자기 자신이 쓴 저장**이
+    /// 외부 변경으로 보여 불필요한 리로드가 돈다(설정을 소유한 쪽에서는 이미
+    /// 인메모리로 반영이 끝난 상태다). 저장에 성공한 호출부는 이 함수로 스냅샷을
+    /// 맞춰 그 자기 메아리를 없앤다.
+    ///
+    /// 파일 mtime 을 못 읽으면 아무것도 하지 않는다 — 그 경우 다음 리로드가
+    /// 한 번 더 도는 것뿐이라 안전한 쪽으로 실패한다.
+    pub fn sync_last_modified(&mut self) {
+        if let Some(path) = Self::default_config_path() {
+            if let Some(mtime) = Self::get_config_mtime(&path) {
+                self.last_modified = Some(mtime);
+            }
+        }
+    }
+
+    /// 설정 파일이 변경되어 다시 로드가 필요한지 확인합니다.
+    ///
+    /// # Returns
+    ///
+    /// 재로드가 필요하면 true
+    pub fn needs_reload(&self) -> bool {
+        let Some(path) = Self::default_config_path() else {
+            return false;
+        };
+
+        let Some(current_mtime) = Self::get_config_mtime(&path) else {
+            return false;
+        };
+
+        match self.last_modified {
+            Some(saved_mtime) => current_mtime > saved_mtime,
+            None => true, // mtime이 없으면 항상 reload
+        }
+    }
+
+    /// 설정 파일이 변경되었으면 다시 로드합니다. (2초 throttling 적용)
+    ///
+    /// 리로드 실패 시 현재 설정을 유지하고 로그를 출력합니다.
+    ///
+    /// # Returns
+    ///
+    /// 재로드 성공 시 true
+    pub fn reload_if_changed(&mut self) -> bool {
+        let now = SystemTime::now();
+
+        // 2초 이내에 이미 확인했다면 건너뜀 (성능 최적화)
+        if let Some(last) = self.last_checked {
+            if let Ok(duration) = now.duration_since(last) {
+                if duration.as_secs() < 2 {
+                    return false;
+                }
+            }
+        }
+
+        self.last_checked = Some(now);
+        self.reload_now()
+    }
+
+    /// 2초 throttling을 **우회해** 즉시 변경 여부를 확인하고 재로드합니다.
+    ///
+    /// `reload_if_changed()` 의 알맹이. 파일을 통째로 덮어쓰기 직전처럼
+    /// "지금 이 순간의 디스크 상태" 가 필요한 자리에서 쓴다 — 스로틀 창(최대 2초)
+    /// 안에 다른 프로세스가 쓴 변경을 못 본 채 저장하면 그 변경이 통째로 사라진다
+    /// (lost update). 실제 예: 엔진 워커의 ATF 토글 persist 경로.
+    ///
+    /// # Returns
+    ///
+    /// 재로드가 실제로 일어났으면 true
+    pub fn reload_now(&mut self) -> bool {
+        if !self.needs_reload() {
+            return false;
+        }
+
+        let Some(path) = Self::default_config_path() else {
+            return false;
+        };
+
+        match Self::load_from_path(&path) {
+            Ok(new_config) => {
+                let last_checked = self.last_checked;
+                *self = new_config;
+                self.last_checked = last_checked;
+                true
+            }
+            Err(e) => {
+                // 리로드 실패 시 현재 설정 유지
+                eprintln!("[UNIM] 설정 리로드 실패: {:?}. 현재 설정을 유지합니다.", e);
+                false
+            }
+        }
+    }
+
+    /// 설정 파일 존재 및 유효성을 보장합니다.
+    ///
+    /// 파일이 없거나 유효하지 않으면 기본 설정으로 생성합니다.
+    ///
+    /// # Returns
+    ///
+    /// 설정 파일 경로 (성공 시)
+    pub fn ensure_config_file() -> Option<PathBuf> {
+        let path = Self::default_config_path()?;
+
+        // 파일 유효성 확인
+        if Self::load_from_path(&path).is_err() {
+            // 기본 설정 저장
+            let default_config = Self::default();
+            if default_config.save_to_path(&path).is_ok() {
+                eprintln!("[UNIM] 설정 파일을 초기화했습니다: {:?}", path);
+            }
+        }
+
+        Some(path)
+    }
+
+    /// 파일의 수정 시간을 가져옵니다.
+    fn get_config_mtime(path: &PathBuf) -> Option<SystemTime> {
+        fs::metadata(path).ok()?.modified().ok()
+    }
+}
+
+/// `Config::load_from_default_path_with_status`의 로드 결과 상태.
+///
+/// 마이그레이션 등 "로드 이후 무조건 재저장"하는 로직이 손상 복구 사실을
+/// 삼키지 않도록 노출한다(GAP-config-06/M-11).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigLoadStatus {
+    /// 정상 로드(또는 최초 생성 — 손상이 아님)
+    Fresh,
+    /// 손상/파싱 실패 등으로 기본값 복구가 발생함
+    Recovered {
+        /// 복구를 유발한 원본 오류 메시지
+        reason: String,
+    },
+}
+
+/// 설정 관련 오류
+#[derive(Clone, Debug)]
+pub enum ConfigError {
+    /// IO 오류
+    IoError(String),
+    /// 파싱 오류
+    ParseError(String),
+    /// 직렬화 오류
+    SerializeError(String),
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigError::IoError(msg) => write!(f, "IO 오류: {}", msg),
+            ConfigError::ParseError(msg) => write!(f, "파싱 오류: {}", msg),
+            ConfigError::SerializeError(msg) => write!(f, "직렬화 오류: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+#[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = Config::default();
+        assert_eq!(config.engine.default_category, InputCategory::English);
+        assert_eq!(config.engine.korean.layout, KOREAN_LAYOUT_DUBEOLSIK);
+        assert_eq!(config.engine.english.layout, "qwerty");
+    }
+
+    #[test]
+    fn normalize_korean_layout_name_handles_legacy_and_aliases() {
+        // 레거시 enum 이름
+        assert_eq!(normalize_korean_layout_name("Dubeolsik"), "ko_2bulstd");
+        assert_eq!(normalize_korean_layout_name("Sebeolsik390"), "ko_3bul390");
+        // 축약 별칭
+        assert_eq!(normalize_korean_layout_name("2bul"), "ko_2bulstd");
+        assert_eq!(normalize_korean_layout_name("390"), "ko_3bul390");
+        assert_eq!(
+            normalize_korean_layout_name("3bul_noshift"),
+            "ko_3bul_noshift"
+        );
+        // 사용자 프로필은 pass-through (쿼티형 세벌식도 0.2.0+에서는 사용자 프로필 경로)
+        assert_eq!(
+            normalize_korean_layout_name("ko_3bul_qwerty"),
+            "ko_3bul_qwerty"
+        );
+        assert_eq!(normalize_korean_layout_name("my_custom"), "my_custom");
+    }
+
+    #[test]
+    fn is_sebeolsik_layout_classifies_correctly() {
+        assert!(!is_sebeolsik_layout("ko_2bulstd"));
+        assert!(!is_sebeolsik_layout("Dubeolsik"));
+        assert!(is_sebeolsik_layout("ko_3bul390"));
+        assert!(is_sebeolsik_layout("Sebeolsik391"));
+        assert!(is_sebeolsik_layout("3bul_noshift"));
+        // ko_3bul_qwerty는 빌트인 아니지만 prefix 매칭으로 세벌식 계열 분류됨 (사용자 프로필)
+        assert!(is_sebeolsik_layout("ko_3bul_qwerty"));
+        // 안마태 자판 — ko_anmatae / anmatae / anmatae_2003 모두 세벌식으로 분류
+        assert!(is_sebeolsik_layout("ko_anmatae"));
+        assert!(is_sebeolsik_layout("anmatae"));
+        assert!(is_sebeolsik_layout("anmatae_2003"));
+    }
+
+    #[test]
+    fn effective_layout_name_defaults_to_builtin() {
+        let kc = KoreanConfig::default();
+        assert_eq!(kc.effective_layout_name(), "ko_2bulstd");
+    }
+
+    #[test]
+    fn effective_layout_name_normalizes_legacy_value() {
+        let mut kc = KoreanConfig::default();
+        kc.layout = "Dubeolsik".to_string();
+        assert_eq!(kc.effective_layout_name(), "ko_2bulstd");
+    }
+
+    #[test]
+    fn effective_layout_name_accepts_user_profile() {
+        let mut kc = KoreanConfig::default();
+        kc.layout = "my_custom_layout".to_string();
+        assert_eq!(kc.effective_layout_name(), "my_custom_layout");
+    }
+
+    #[test]
+    fn korean_config_serde_roundtrips_rule_sets() {
+        let mut kc = KoreanConfig::default();
+        kc.layout = "ko_3bul390".to_string();
+        kc.active_rule_sets = Some(vec!["set_a".to_string(), "set_b".to_string()]);
+        let yaml = serde_yaml::to_string(&kc).unwrap();
+        let back: KoreanConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(back.layout, "ko_3bul390");
+        assert_eq!(
+            back.active_rule_sets,
+            Some(vec!["set_a".to_string(), "set_b".to_string()])
+        );
+    }
+
+    /// `Some(vec![])` = "사용자가 모든 규칙 세트를 끔" 의도가 round-trip에서 보존되어야 한다.
+    /// (이전 Vec<String> 시절에는 빈 vec → 프로필 기본값 fallback이라 의도가 손실되던 버그.)
+    #[test]
+    fn korean_config_serde_roundtrips_explicit_all_off() {
+        let mut kc = KoreanConfig::default();
+        kc.active_rule_sets = Some(Vec::new());
+        let yaml = serde_yaml::to_string(&kc).unwrap();
+        let back: KoreanConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            back.active_rule_sets,
+            Some(Vec::<String>::new()),
+            "Some(vec![])는 명시적 All OFF 의도, round-trip 보존 필수"
+        );
+    }
+
+    /// `None`은 직렬화 시 YAML 필드 자체가 누락된다(`skip_serializing_if`).
+    #[test]
+    fn korean_config_none_skips_field_in_yaml() {
+        let kc = KoreanConfig::default();
+        assert!(kc.active_rule_sets.is_none());
+        let yaml = serde_yaml::to_string(&kc).unwrap();
+        assert!(
+            !yaml.contains("active_rule_sets"),
+            "None일 때 active_rule_sets 키가 직렬화 결과에 없어야 함: {yaml}"
+        );
+        let back: KoreanConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(back.active_rule_sets, None);
+    }
+
+    /// 레거시 YAML(필드 부재) → `None` (프로필 기본값 사용).
+    #[test]
+    fn korean_config_legacy_missing_field_is_none() {
+        let yaml = r#"
+layout: ko_2bulstd
+preedit_johab: false
+word_commit: false
+"#;
+        let kc: KoreanConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(kc.active_rule_sets, None);
+    }
+
+    // ─────────────────────────────────────────────
+    // commit_unit (단어별 preedit Phase 2) — 직렬화 + word_commit 브리지
+    // ─────────────────────────────────────────────
+
+    /// 기본값은 Smart (종전 출고 게이트 = winword 만 Word, 그 외 Syllable 과 동치).
+    #[test]
+    fn commit_unit_default_is_smart() {
+        assert_eq!(CommitUnit::default(), CommitUnit::Smart);
+        assert_eq!(KoreanConfig::default().commit_unit, CommitUnit::Smart);
+    }
+
+    /// CommitUnit::Word 가 직렬화/역직렬화 라운드트립을 통과한다.
+    #[test]
+    fn commit_unit_serde_roundtrips_word() {
+        let mut kc = KoreanConfig::default();
+        kc.commit_unit = CommitUnit::Word;
+        let yaml = serde_yaml::to_string(&kc).unwrap();
+        let back: KoreanConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(back.commit_unit, CommitUnit::Word);
+    }
+
+    /// Smart 도 라운드트립 보존.
+    #[test]
+    fn commit_unit_serde_roundtrips_smart() {
+        let mut kc = KoreanConfig::default();
+        kc.commit_unit = CommitUnit::Smart;
+        let yaml = serde_yaml::to_string(&kc).unwrap();
+        let back: KoreanConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(back.commit_unit, CommitUnit::Smart);
+    }
+
+    /// 레거시 `word_commit: true` + commit_unit 미지정 → Word 로 승격.
+    #[test]
+    fn commit_unit_bridges_legacy_word_commit_true() {
+        let yaml = r#"
+layout: ko_2bulstd
+word_commit: true
+"#;
+        let kc: KoreanConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(kc.commit_unit, CommitUnit::Word);
+    }
+
+    /// 레거시 `word_commit: false`(또는 부재) + commit_unit 미지정 → 기본값(Smart).
+    ///
+    /// `word_commit` 는 출고된 사용자 가시 설정이 아니라 내부 전환기 브리지 필드라
+    /// (CLI/GUI 어디에도 노출 안 됨) `false`/부재를 구분할 plain `bool` 이며, 둘 다
+    /// 기본값으로 떨어진다. 종전 게이트가 winword 를 무조건 Word 로 강제했으므로
+    /// 이 매핑(Smart)은 그 출고 동작과 정합한다(회귀 아님).
+    #[test]
+    fn commit_unit_bridges_legacy_word_commit_false_uses_default() {
+        let yaml = r#"
+layout: ko_2bulstd
+word_commit: false
+"#;
+        let kc: KoreanConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(kc.commit_unit, CommitUnit::Smart);
+    }
+
+    /// 명시 commit_unit 은 레거시 word_commit 브리지보다 우선한다 (구 config 보존).
+    #[test]
+    fn commit_unit_explicit_overrides_legacy_word_commit() {
+        let yaml = r#"
+layout: ko_2bulstd
+word_commit: true
+commit_unit: Syllable
+"#;
+        let kc: KoreanConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            kc.commit_unit,
+            CommitUnit::Syllable,
+            "명시 commit_unit 이 word_commit 브리지보다 우선해야 함"
+        );
+    }
+
+    /// 미지정(필드 부재) + word_commit 부재 → 기본값(Smart).
+    #[test]
+    fn commit_unit_legacy_missing_field_uses_default_smart() {
+        let yaml = "layout: ko_2bulstd\n";
+        let kc: KoreanConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(kc.commit_unit, CommitUnit::Smart);
+    }
+
+    /// all()/display_name() 미러 정합성.
+    #[test]
+    fn commit_unit_all_and_display_name() {
+        assert_eq!(CommitUnit::all().len(), 3);
+        for u in CommitUnit::all() {
+            assert!(!u.display_name().is_empty());
+        }
+    }
+
+    // ─────────────────────────────────────────────
+    // word_mode_apps (I4 per-app 앱호환 외부화) — 기본값 보존 + 직렬화 라운드트립
+    // ─────────────────────────────────────────────
+
+    /// 기본 단어모드 화이트리스트는 플랫폼 분기 — Windows=winword.exe 만, 리눅스=빈 목록
+    /// (winword.exe 는 리눅스에서 실행 불가 → 죽은 항목 seed 회피). wmux 는 양 플랫폼
+    /// 모두 음절모드 synth 라우팅 동작 확인 후 제외(device-QA PASS).
+    #[test]
+    fn word_mode_apps_default_is_platform_branched() {
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            KoreanConfig::default().word_mode_apps,
+            vec!["winword.exe".to_string()],
+            "Windows 기본 단어모드 화이트리스트는 winword.exe 만"
+        );
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(
+            KoreanConfig::default().word_mode_apps,
+            Vec::<String>::new(),
+            "리눅스 기본 단어모드 화이트리스트는 빈 목록"
+        );
+    }
+
+    /// 사용자 지정 목록이 직렬화/역직렬화 라운드트립을 통과한다.
+    #[test]
+    fn word_mode_apps_serde_roundtrips() {
+        let mut kc = KoreanConfig::default();
+        kc.word_mode_apps = vec!["winword.exe".to_string(), "foo.exe".to_string()];
+        let yaml = serde_yaml::to_string(&kc).unwrap();
+        let back: KoreanConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            back.word_mode_apps,
+            vec!["winword.exe".to_string(), "foo.exe".to_string()]
+        );
+    }
+
+    /// 레거시 YAML(필드 부재) → 플랫폼 기본값. Windows=winword.exe, 리눅스=빈 목록.
+    /// 기존 config.yaml 무회귀.
+    #[test]
+    fn word_mode_apps_legacy_missing_field_uses_default() {
+        let yaml = r#"
+layout: ko_2bulstd
+word_commit: false
+"#;
+        let kc: KoreanConfig = serde_yaml::from_str(yaml).unwrap();
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            kc.word_mode_apps,
+            vec!["winword.exe".to_string()],
+            "Windows: 필드 부재 시 기본값(winword.exe)"
+        );
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(
+            kc.word_mode_apps,
+            Vec::<String>::new(),
+            "리눅스: 필드 부재 시 빈 목록"
+        );
+    }
+
+    /// 리눅스 마이그레이션: 구 기본값 잔재 `word_mode_apps: [winword.exe]`(단일 원소)는
+    /// 리눅스에서 빈 목록으로 치환되고, Windows 에서는 실제 대상이므로 보존된다.
+    #[test]
+    fn word_mode_apps_winword_singleton_migrates_on_linux() {
+        let yaml = r#"
+layout: ko_2bulstd
+word_mode_apps:
+  - winword.exe
+"#;
+        let kc: KoreanConfig = serde_yaml::from_str(yaml).unwrap();
+        #[cfg(target_os = "windows")]
+        assert_eq!(kc.word_mode_apps, vec!["winword.exe".to_string()]);
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(
+            kc.word_mode_apps,
+            Vec::<String>::new(),
+            "리눅스: winword.exe 단일 잔재는 빈 목록으로 마이그레이션"
+        );
+    }
+
+    /// 명시적 빈 목록(`word_mode_apps: []`)은 빈 vec 로 보존된다
+    /// (= Smart 게이트가 어떤 앱도 단어 모드로 켜지 않음, 유효한 의도).
+    #[test]
+    fn word_mode_apps_explicit_empty_list_preserved() {
+        let yaml = r#"
+layout: ko_2bulstd
+word_mode_apps: []
+"#;
+        let kc: KoreanConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(kc.word_mode_apps, Vec::<String>::new());
+    }
+
+    /// 사용자 지정 목록이 KoreanConfigCompat 브리지를 통해 그대로 흡수된다.
+    #[test]
+    fn word_mode_apps_explicit_list_overrides_default() {
+        let yaml = r#"
+layout: ko_2bulstd
+word_mode_apps:
+  - winword.exe
+  - wmux.exe
+  - kakaotalk.exe
+"#;
+        let kc: KoreanConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            kc.word_mode_apps,
+            vec![
+                "winword.exe".to_string(),
+                "wmux.exe".to_string(),
+                "kakaotalk.exe".to_string()
+            ]
+        );
+    }
+
+    // ─────────────────────────────────────────────
+    // toggle_announce_beep (I7 한/영 전환 능동 통지) — 기본값 + 직렬화 라운드트립
+    // ─────────────────────────────────────────────
+
+    /// 기본값은 false — 현행 무음 동작을 바이트동일 보존(무회귀).
+    #[test]
+    fn toggle_announce_beep_default_is_false() {
+        assert!(!EngineConfig::default().toggle_announce_beep);
+        assert!(!Config::default().engine.toggle_announce_beep);
+    }
+
+    /// true 설정이 직렬화/역직렬화 라운드트립을 통과한다.
+    #[test]
+    fn toggle_announce_beep_serde_roundtrips() {
+        let mut config = Config::default();
+        config.engine.toggle_announce_beep = true;
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let back: Config = serde_yaml::from_str(&yaml).unwrap();
+        assert!(back.engine.toggle_announce_beep);
+    }
+
+    /// 레거시 YAML(필드 부재) → false (기존 config.yaml 무회귀).
+    #[test]
+    fn toggle_announce_beep_legacy_missing_field_is_false() {
+        let yaml = r#"
+engine:
+  default_category: English
+  toggle_keys:
+    - Korean
+    - RightAlt
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            !config.engine.toggle_announce_beep,
+            "필드 부재 시 false(현행 무음 동작)로 채워져야 함"
+        );
+    }
+
+    // ─────────────────────────────────────────────
+    // ignore_key_repeat (조합키 자동반복 억제, 접근성) — 기본값 + 라운드트립
+    // ─────────────────────────────────────────────
+
+    /// 기본값은 false — 현행 자동반복 동작을 바이트동일 보존(무회귀).
+    #[test]
+    fn ignore_key_repeat_default_is_false() {
+        assert!(!EngineConfig::default().ignore_key_repeat);
+        assert!(!Config::default().engine.ignore_key_repeat);
+    }
+
+    /// true 설정이 직렬화/역직렬화 라운드트립을 통과한다.
+    #[test]
+    fn ignore_key_repeat_serde_roundtrips() {
+        let mut config = Config::default();
+        config.engine.ignore_key_repeat = true;
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let back: Config = serde_yaml::from_str(&yaml).unwrap();
+        assert!(back.engine.ignore_key_repeat);
+    }
+
+    /// 레거시 YAML(필드 부재) → false (기존 config.yaml 무회귀).
+    #[test]
+    fn ignore_key_repeat_legacy_missing_field_is_false() {
+        let yaml = r#"
+engine:
+  default_category: English
+  toggle_keys:
+    - Korean
+    - RightAlt
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            !config.engine.ignore_key_repeat,
+            "필드 부재 시 false(현행 자동반복 동작)로 채워져야 함"
+        );
+    }
+
+    // ─────────────────────────────────────────────
+    // AutoTypeFix 토글 단축키 3종 — 기본값 + 라운드트립 + 레거시 호환
+    // ─────────────────────────────────────────────
+
+    /// 전체 토글 기본값은 `Shift+F8`, 순방향/역방향은 빈 목록(옵트인).
+    ///
+    /// F8 인 이유(F9~F11 리매핑 소실 회피)는 `default_auto_typefix_toggle_enabled_keys`
+    /// 주석 참조.
+    #[test]
+    fn atf_toggle_keys_default_is_shift_f8() {
+        let atf = AutoTypeFixConfig::default();
+        assert_eq!(atf.toggle_enabled_keys, vec!["Shift+F8"]);
+        assert!(atf.toggle_forward_keys.is_empty());
+        assert!(atf.toggle_reverse_keys.is_empty());
+        // Config → EngineConfig 경유 기본값도 동일.
+        assert_eq!(
+            Config::default().engine.auto_typefix.toggle_enabled_keys,
+            vec!["Shift+F8"]
+        );
+    }
+
+    /// 값 설정이 직렬화/역직렬화 라운드트립을 통과한다.
+    #[test]
+    fn atf_toggle_keys_serde_roundtrips() {
+        let mut config = Config::default();
+        config.engine.auto_typefix.toggle_enabled_keys = vec!["F10".to_string()];
+        config.engine.auto_typefix.toggle_forward_keys = vec!["F11".to_string()];
+        config.engine.auto_typefix.toggle_reverse_keys = vec!["F12".to_string()];
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let back: Config = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(back.engine.auto_typefix.toggle_enabled_keys, vec!["F10"]);
+        assert_eq!(back.engine.auto_typefix.toggle_forward_keys, vec!["F11"]);
+        assert_eq!(back.engine.auto_typefix.toggle_reverse_keys, vec!["F12"]);
+    }
+
+    /// 레거시 YAML(필드 부재) → serde default 로 기본값이 채워진다.
+    ///
+    /// 기존 config.yaml 에 이 필드가 없던 사용자도 전체 토글 `Shift+F8` 를 얻는다
+    /// (기본값 제공이 의도 — 필드가 명시돼 있으면 그 값이 그대로 존중된다).
+    #[test]
+    fn atf_toggle_keys_legacy_missing_field_uses_default() {
+        let yaml = r#"
+engine:
+  auto_typefix:
+    enabled: true
+    forward: true
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.engine.auto_typefix.toggle_enabled_keys,
+            vec!["Shift+F8"],
+            "필드 부재 시 기본값(Shift+F8)으로 채워져야 함"
+        );
+        assert!(config.engine.auto_typefix.toggle_forward_keys.is_empty());
+        assert!(config.engine.auto_typefix.toggle_reverse_keys.is_empty());
+    }
+
+    /// 명시적 빈 목록은 존중된다 — 핫키를 완전히 끄는 opt-out 경로.
+    #[test]
+    fn atf_toggle_keys_explicit_empty_is_respected() {
+        let yaml = r#"
+engine:
+  auto_typefix:
+    toggle_enabled_keys: []
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            config.engine.auto_typefix.toggle_enabled_keys.is_empty(),
+            "명시적 빈 목록은 기본값으로 덮이면 안 됨"
+        );
+    }
+
+    // ─────────────────────────────────────────────
+    // layout_rule_sets 캐시 동작 — switch_layout / cache_active_rule_sets
+    // ─────────────────────────────────────────────
+
+    #[test]
+    fn switch_layout_caches_old_and_restores_new() {
+        // A에서 토글 후 B로 전환 → A의 상태가 캐시에 보존되어야 한다.
+        let mut kc = KoreanConfig::default();
+        kc.layout = "ko_2bulstd".to_string();
+        kc.active_rule_sets = Some(vec!["a_set".to_string()]);
+        kc.switch_layout("ko_3bul390", None);
+
+        assert_eq!(kc.layout, "ko_3bul390");
+        // 새 자판은 캐시 없으므로 None (프로필 기본값 사용).
+        assert_eq!(kc.active_rule_sets, None);
+        // 이전 자판 상태는 캐시에 보존.
+        assert_eq!(
+            kc.layout_rule_sets.get("ko_2bulstd"),
+            Some(&vec!["a_set".to_string()])
+        );
+    }
+
+    #[test]
+    fn switch_layout_restores_cached_state_on_return() {
+        // A → B → A 왕복 시 A의 상태가 복원되어야 한다.
+        let mut kc = KoreanConfig::default();
+        kc.layout = "ko_2bulstd".to_string();
+        kc.active_rule_sets = Some(vec!["a_set".to_string()]);
+        kc.switch_layout("ko_3bul390", None);
+        // B에서 다른 상태로 토글.
+        kc.active_rule_sets = Some(vec!["b_set".to_string()]);
+        kc.cache_active_rule_sets();
+        // 다시 A로.
+        kc.switch_layout("ko_2bulstd", None);
+
+        assert_eq!(kc.layout, "ko_2bulstd");
+        assert_eq!(
+            kc.active_rule_sets,
+            Some(vec!["a_set".to_string()]),
+            "A로 돌아왔을 때 A의 활성 룰셋 상태가 복원되어야 함"
+        );
+        // B의 캐시도 보존되어야 함 (다음에 B로 갈 때 사용).
+        assert_eq!(
+            kc.layout_rule_sets.get("ko_3bul390"),
+            Some(&vec!["b_set".to_string()])
+        );
+    }
+
+    #[test]
+    fn switch_layout_preserves_explicit_all_off() {
+        // Some(vec![]) (명시 All OFF) 의도가 캐시 → 복원 시 보존되어야 한다.
+        let mut kc = KoreanConfig::default();
+        kc.layout = "ko_2bulstd".to_string();
+        kc.active_rule_sets = Some(Vec::new()); // 명시 All OFF
+        kc.switch_layout("ko_3bul390", None);
+        kc.switch_layout("ko_2bulstd", None);
+
+        assert_eq!(
+            kc.active_rule_sets,
+            Some(Vec::<String>::new()),
+            "명시 All OFF 의도가 자판 왕복 후에도 보존"
+        );
+    }
+
+    #[test]
+    fn switch_layout_does_not_cache_none() {
+        // None(프로필 기본값 사용)은 캐시하지 않는다 — 캐시되면 다음에 None을 못 만듦.
+        let mut kc = KoreanConfig::default();
+        kc.layout = "ko_2bulstd".to_string();
+        kc.active_rule_sets = None;
+        kc.switch_layout("ko_3bul390", None);
+
+        assert!(
+            kc.layout_rule_sets.is_empty(),
+            "None은 캐시되지 않아야 함 (의미상 '캐시 없음 = 프로필 기본')"
+        );
+    }
+
+    #[test]
+    fn switch_layout_same_name_is_noop() {
+        let mut kc = KoreanConfig::default();
+        kc.layout = "ko_2bulstd".to_string();
+        kc.active_rule_sets = Some(vec!["x".to_string()]);
+        let before = kc.layout_rule_sets.clone();
+        kc.switch_layout("ko_2bulstd", None);
+        assert_eq!(kc.layout_rule_sets, before);
+        assert_eq!(kc.active_rule_sets, Some(vec!["x".to_string()]));
+    }
+
+    #[test]
+    fn switch_layout_filters_stale_rule_set_names() {
+        // 캐시된 이름 중 새 프로필에 없는 것은 정리.
+        let mut kc = KoreanConfig::default();
+        kc.layout = "ko_2bulstd".to_string();
+        kc.layout_rule_sets.insert(
+            "ko_3bul390".to_string(),
+            vec!["valid".to_string(), "stale".to_string()],
+        );
+        let valid_names = vec!["valid".to_string(), "other".to_string()];
+        kc.switch_layout("ko_3bul390", Some(&valid_names));
+        assert_eq!(kc.active_rule_sets, Some(vec!["valid".to_string()]));
+    }
+
+    #[test]
+    fn cache_active_rule_sets_writes_some_removes_none() {
+        let mut kc = KoreanConfig::default();
+        kc.layout = "ko_2bulstd".to_string();
+        kc.active_rule_sets = Some(vec!["x".to_string()]);
+        kc.cache_active_rule_sets();
+        assert_eq!(
+            kc.layout_rule_sets.get("ko_2bulstd"),
+            Some(&vec!["x".to_string()])
+        );
+        // None으로 되돌리면 캐시 entry 제거.
+        kc.active_rule_sets = None;
+        kc.cache_active_rule_sets();
+        assert!(!kc.layout_rule_sets.contains_key("ko_2bulstd"));
+    }
+
+    #[test]
+    fn korean_config_serde_roundtrips_layout_rule_sets() {
+        let mut kc = KoreanConfig::default();
+        kc.layout = "ko_3bul390".to_string();
+        kc.layout_rule_sets
+            .insert("ko_2bulstd".to_string(), vec!["a".to_string()]);
+        kc.layout_rule_sets
+            .insert("ko_3bul390".to_string(), vec!["b".to_string(), "c".to_string()]);
+        let yaml = serde_yaml::to_string(&kc).unwrap();
+        let back: KoreanConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(back.layout_rule_sets.len(), 2);
+        assert_eq!(
+            back.layout_rule_sets.get("ko_2bulstd"),
+            Some(&vec!["a".to_string()])
+        );
+    }
+
+    #[test]
+    fn korean_config_empty_layout_rule_sets_skips_field_in_yaml() {
+        let kc = KoreanConfig::default();
+        assert!(kc.layout_rule_sets.is_empty());
+        let yaml = serde_yaml::to_string(&kc).unwrap();
+        assert!(
+            !yaml.contains("layout_rule_sets"),
+            "빈 BTreeMap일 때 YAML에 layout_rule_sets 키 없어야 함: {yaml}"
+        );
+    }
+
+    /// 명시적 빈 list (`active_rule_sets: []`)는 `Some(vec![])`로 로드되어
+    /// "모두 OFF" 의도로 해석된다.
+    #[test]
+    fn korean_config_explicit_empty_list_is_some_empty() {
+        let yaml = r#"
+layout: ko_2bulstd
+preedit_johab: false
+word_commit: false
+active_rule_sets: []
+"#;
+        let kc: KoreanConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(kc.active_rule_sets, Some(Vec::<String>::new()));
+    }
+
+    #[test]
+    fn korean_config_legacy_yaml_enum_variant_normalized() {
+        // Phase 4 이전 포맷 (`layout: Dubeolsik`)도 로드 가능 — 자동 정식 이름 승격.
+        let yaml = r#"
+layout: Dubeolsik
+preedit_johab: false
+word_commit: false
+"#;
+        let kc: KoreanConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(kc.layout, "ko_2bulstd");
+        assert_eq!(kc.active_rule_sets, None);
+        assert_eq!(kc.effective_layout_name(), "ko_2bulstd");
+    }
+
+    #[test]
+    fn korean_config_legacy_custom_layout_overrides_layout() {
+        // Phase 4b 포맷 (`layout: Dubeolsik, custom_layout: "my_x"`) 흡수.
+        let yaml = r#"
+layout: Dubeolsik
+custom_layout: my_custom
+preedit_johab: false
+word_commit: false
+"#;
+        let kc: KoreanConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            kc.layout, "my_custom",
+            "custom_layout이 Some이면 layout을 덮어씀"
+        );
+    }
+
+    #[test]
+    fn test_input_category() {
+        let korean = InputCategory::Korean;
+        let english = InputCategory::English;
+        assert_ne!(korean, english);
+    }
+
+    // === Config 직렬화/역직렬화 테스트 ===
+
+    #[test]
+    fn test_config_serialize_deserialize() {
+        let config = Config::default();
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let deserialized: Config = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            deserialized.engine.default_category,
+            config.engine.default_category
+        );
+        assert_eq!(
+            deserialized.engine.korean.layout,
+            config.engine.korean.layout
+        );
+        assert_eq!(
+            deserialized.engine.english.layout,
+            config.engine.english.layout
+        );
+        assert_eq!(deserialized.engine.mode_sharing, config.engine.mode_sharing);
+    }
+
+    #[test]
+    fn test_config_save_and_load() {
+        let config = Config::default();
+        let dir = std::env::temp_dir().join("unim_test_config");
+        let path = dir.join("test_config.yaml");
+
+        config.save_to_path(&path).unwrap();
+        let loaded = Config::load_from_path(&path).unwrap();
+
+        assert_eq!(loaded.engine.korean.layout, config.engine.korean.layout);
+        assert_eq!(loaded.engine.toggle_keys, config.engine.toggle_keys);
+
+        // 정리
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_config_load_nonexistent() {
+        let path = PathBuf::from("/tmp/unim_nonexistent_config_12345.yaml");
+        let result = Config::load_from_path(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_load_invalid_yaml() {
+        let dir = std::env::temp_dir().join("unim_test_invalid");
+        let path = dir.join("bad_config.yaml");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&path, "{{{{invalid yaml").unwrap();
+
+        let result = Config::load_from_path(&path);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// GAP-config-durability-and-write-races-01: 파싱 실패 시 기본값으로 덮어쓰기
+    /// 전에 손상 파일을 `<path>.corrupt-<ts>` 로 백업해야 한다.
+    #[test]
+    fn test_handle_load_error_backs_up_corrupt_file_before_overwrite() {
+        let dir = std::env::temp_dir().join("unim_test_corrupt_backup");
+        let path = dir.join("bad_config.yaml");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&path, "{{{{invalid yaml").unwrap();
+
+        let error = Config::load_from_path(&path).unwrap_err();
+        assert!(matches!(error, ConfigError::ParseError(_)));
+
+        // 손상 복구 경로를 그대로 태운다 (load_from_default_path와 동일 로직).
+        let _recovered = Config::handle_load_error(&path, error);
+
+        // 원본은 기본값으로 덮어써졌어야 하고, 손상 시점 원본은 백업으로 남아야 한다.
+        let backup_exists = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("bad_config.yaml.corrupt-")
+            });
+        assert!(backup_exists, "손상된 설정 파일 백업이 생성되지 않음");
+
+        let backed_up_content = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("bad_config.yaml.corrupt-")
+            })
+            .map(|e| fs::read_to_string(e.path()).unwrap())
+            .unwrap();
+        assert_eq!(backed_up_content, "{{{{invalid yaml");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// MINOR(검증자 지적): 손상 백업 후 기본값 저장이 계속 실패하는 환경에서는
+    /// 기동할 때마다 `.corrupt-*` 가 하나씩 늘어날 수 있다. `MAX_CORRUPT_BACKUPS`
+    /// 를 넘으면 오래된 것부터(mtime 기준) 정리해 무한 누적을 막는다.
+    #[test]
+    fn test_prune_corrupt_backups_caps_count_and_keeps_newest() {
+        let dir = std::env::temp_dir().join("unim_test_corrupt_prune");
+        let _ = std::fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+
+        // MAX_CORRUPT_BACKUPS(3)보다 많은 5개를 mtime 순서를 명확히 두고 생성.
+        let mut backup_paths = Vec::new();
+        for i in 0..5u64 {
+            let backup = path.with_extension(format!("yaml.corrupt-{}", i));
+            fs::write(&backup, format!("backup-{i}")).unwrap();
+            let mtime = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000 + i);
+            // Windows 는 `SetFileTime` 에 쓰기 권한 핸들을 요구한다 — 읽기 전용
+            // `File::open` 으로는 ERROR_ACCESS_DENIED(5) 가 난다.
+            let file = std::fs::OpenOptions::new().write(true).open(&backup).unwrap();
+            file.set_modified(mtime).unwrap();
+            backup_paths.push(backup);
+        }
+
+        Config::prune_corrupt_backups(&path);
+
+        let remaining: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("config.yaml.corrupt-"))
+            .collect();
+
+        assert_eq!(
+            remaining.len(),
+            Config::MAX_CORRUPT_BACKUPS,
+            "MAX_CORRUPT_BACKUPS 개까지만 남아야 함: {:?}",
+            remaining
+        );
+        // 가장 오래된 2개(인덱스 0, 1)는 지워지고 최신 3개(2, 3, 4)만 남아야 함.
+        assert!(!remaining.contains(&"config.yaml.corrupt-0".to_string()));
+        assert!(!remaining.contains(&"config.yaml.corrupt-1".to_string()));
+        assert!(remaining.contains(&"config.yaml.corrupt-4".to_string()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// GAP-config-06/M-11: 파싱 실패(손상)는 `Recovered`, 파일 부재(최초 실행)와
+    /// 퍼미션 오류는 `Fresh`로 분류돼야 마이그레이션 등이 손상 이력을 삼키지 않는다.
+    #[test]
+    fn test_classify_load_error_distinguishes_recovery_from_fresh_start() {
+        let parse_err = ConfigError::ParseError("invalid mapping".to_string());
+        assert!(matches!(
+            Config::classify_load_error(&parse_err),
+            ConfigLoadStatus::Recovered { .. }
+        ));
+
+        let not_found_err = ConfigError::IoError(
+            "No such file or directory (os error 2)".to_string(),
+        );
+        assert_eq!(
+            Config::classify_load_error(&not_found_err),
+            ConfigLoadStatus::Fresh
+        );
+
+        let permission_err = ConfigError::IoError("Permission denied (os error 13)".to_string());
+        assert_eq!(
+            Config::classify_load_error(&permission_err),
+            ConfigLoadStatus::Fresh
+        );
+
+        let other_io_err = ConfigError::IoError("Too many open files (os error 24)".to_string());
+        assert!(matches!(
+            Config::classify_load_error(&other_io_err),
+            ConfigLoadStatus::Recovered { .. }
+        ));
+    }
+
+    // === Config needs_reload 테스트 ===
+
+    #[test]
+    fn test_config_needs_reload_no_mtime() {
+        let config = Config {
+            last_modified: None,
+            ..Config::default()
+        };
+        // mtime이 None이면 reload 필요 (파일이 존재할 경우)
+        // 파일 경로가 없으면 false 반환
+        let _ = config.needs_reload();
+    }
+
+    // === 레이아웃 enum 테스트 ===
+
+    #[test]
+    fn test_korean_layout_builtins() {
+        let all = KOREAN_LAYOUT_BUILTINS;
+        assert_eq!(all.len(), 4);
+        assert!(all.contains(&"ko_2bulstd"));
+        assert!(all.contains(&"ko_3bul390"));
+        assert!(all.contains(&"ko_3bul391"));
+        assert!(all.contains(&"ko_3bul_noshift"));
+        // 0.2.0+: ko_3bul_qwerty는 빌트인 아님 (연구 자료로만 보존)
+        assert!(!all.contains(&"ko_3bul_qwerty"));
+    }
+
+    #[test]
+    fn test_english_layout_builtins() {
+        let all = ENGLISH_LAYOUT_BUILTINS;
+        assert_eq!(all.len(), 5);
+        assert!(all.contains(&"qwerty"));
+        assert!(all.contains(&"colemak_dh"));
+    }
+
+    #[test]
+    fn test_english_layout_keymap_name() {
+        assert_eq!(english_layout_keymap_name("dvorak"), "en_dvorak");
+        assert_eq!(english_layout_keymap_name("colemak"), "en_colemak");
+        assert_eq!(english_layout_keymap_name("colemak_dh"), "en_colemak_dh");
+        assert_eq!(english_layout_keymap_name("workman"), "en_workman");
+        // 레거시 enum 이름 → 소문자 승격
+        assert_eq!(english_layout_keymap_name("Dvorak"), "en_dvorak");
+    }
+
+    #[test]
+    fn test_english_layout_top_row_labels() {
+        assert_eq!(english_layout_top_row_labels("qwerty"), "QWERTYUIO");
+        assert_eq!(english_layout_top_row_labels("dvorak"), "',.PYFGCR");
+        assert_eq!(english_layout_top_row_labels("colemak"), "QWFPGJLUY");
+    }
+
+    #[test]
+    fn normalize_english_layout_name_handles_legacy() {
+        assert_eq!(normalize_english_layout_name("Qwerty"), "qwerty");
+        assert_eq!(normalize_english_layout_name("ColemakDh"), "colemak_dh");
+        assert_eq!(normalize_english_layout_name("colemak-dh"), "colemak_dh");
+        assert_eq!(normalize_english_layout_name("workman"), "workman");
+        // 사용자 프로필 pass-through
+        assert_eq!(normalize_english_layout_name("my_dvorak"), "my_dvorak");
+    }
+
+    #[test]
+    fn english_config_legacy_yaml_enum_variant_normalized() {
+        // 레거시 `layout: Qwerty` 포맷 로드 → 정식 소문자 이름으로 승격.
+        let yaml = r#"
+layout: Qwerty
+preferred_direct: true
+"#;
+        let ec: EnglishConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(ec.layout, "qwerty");
+
+        let yaml2 = r#"
+layout: ColemakDh
+preferred_direct: false
+"#;
+        let ec2: EnglishConfig = serde_yaml::from_str(yaml2).unwrap();
+        assert_eq!(ec2.layout, "colemak_dh");
+    }
+
+    #[test]
+    fn test_mode_sharing_all() {
+        let all = ModeSharingMode::all();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn test_mode_sharing_display_name() {
+        assert!(!ModeSharingMode::Global.display_name().is_empty());
+        assert!(!ModeSharingMode::PerApp.display_name().is_empty());
+    }
+
+    // === KoreanConfig 모아치기 설정 테스트 ===
+
+    #[test]
+    fn default_chord_window_unset() {
+        let config = Config::default();
+        assert_eq!(
+            config.engine.korean.chord_window_ms, None,
+            "chord_window_ms default must be None (OPT-IN OFF)"
+        );
+        assert_eq!(
+            config.engine.korean.bidirectional_combine, None,
+            "bidirectional_combine default must be None"
+        );
+    }
+
+    #[test]
+    fn validate_chord_window_range() {
+        // OK cases
+        assert!(KoreanConfig::validate_chord_window_ms(None).is_ok());
+        assert!(KoreanConfig::validate_chord_window_ms(Some(0)).is_ok());
+        assert!(KoreanConfig::validate_chord_window_ms(Some(10)).is_ok());
+        assert!(KoreanConfig::validate_chord_window_ms(Some(60)).is_ok());
+        assert!(KoreanConfig::validate_chord_window_ms(Some(150)).is_ok());
+        assert!(KoreanConfig::validate_chord_window_ms(Some(200)).is_ok());
+        // Err cases
+        assert!(KoreanConfig::validate_chord_window_ms(Some(1)).is_err());
+        assert!(KoreanConfig::validate_chord_window_ms(Some(9)).is_err());
+        assert!(KoreanConfig::validate_chord_window_ms(Some(201)).is_err());
+        assert!(KoreanConfig::validate_chord_window_ms(Some(65535)).is_err());
+    }
+
+    // === EngineConfig 기본값 테스트 ===
+
+    #[test]
+    fn test_engine_config_defaults() {
+        let config = EngineConfig::default();
+        assert_eq!(config.toggle_keys, vec!["Korean", "RightAlt"]);
+        assert_eq!(config.hanja_keys, vec!["Hanja", "F9"]);
+        assert_eq!(config.mode_sharing, ModeSharingMode::Global);
+    }
+
+    // === Custom config 직렬화 테스트 ===
+
+    #[test]
+    fn test_config_custom_values() {
+        let mut config = Config::default();
+        config.engine.korean.layout = "ko_3bul390".to_string();
+        config.engine.english.layout = "dvorak".to_string();
+        config.engine.mode_sharing = ModeSharingMode::PerApp;
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let loaded: Config = serde_yaml::from_str(&yaml).unwrap();
+
+        assert_eq!(loaded.engine.korean.layout, "ko_3bul390");
+        assert_eq!(loaded.engine.english.layout, "dvorak");
+        assert_eq!(loaded.engine.mode_sharing, ModeSharingMode::PerApp);
+    }
+
+    // === AutoTypeFix 기본값/범위 테스트 ===
+
+    #[test]
+    fn test_auto_typefix_defaults() {
+        let c = AutoTypeFixConfig::default();
+        assert!(c.enabled);
+        assert_eq!(c.forward_time_window_ms, 5000);
+        assert_eq!(c.reverse_time_window_ms, 5000);
+        assert_eq!(c.kor_syllable_threshold, 2);
+        assert_eq!(c.eng_word_min_length, 5);
+        assert!(c.forward);
+        assert!(c.reverse);
+        assert!(c.skip_on_english_word);
+        assert!(c.skip_on_complete_syllable);
+        assert!(!c.rollback_detection, "hanfix-ime: learning only on explicit Ctrl+Z undo");
+        assert_eq!(c.tentative_expiry_hours, 4);
+        assert_eq!(c.observation_timeout_secs, 10);
+    }
+
+    #[test]
+    fn test_auto_typefix_clamp_expiry() {
+        let mut c = AutoTypeFixConfig {
+            tentative_expiry_hours: 500,
+            ..Default::default()
+        };
+        c.clamp_ranges();
+        assert_eq!(c.tentative_expiry_hours, AUTO_TYPEFIX_TENTATIVE_EXPIRY_MAX);
+
+        let mut c = AutoTypeFixConfig {
+            tentative_expiry_hours: 0,
+            ..Default::default()
+        };
+        c.clamp_ranges();
+        assert_eq!(c.tentative_expiry_hours, AUTO_TYPEFIX_TENTATIVE_EXPIRY_MIN);
+
+        let mut c = AutoTypeFixConfig {
+            observation_timeout_secs: 99,
+            ..Default::default()
+        };
+        c.clamp_ranges();
+        assert_eq!(
+            c.observation_timeout_secs,
+            AUTO_TYPEFIX_OBSERVATION_TIMEOUT_MAX
+        );
+
+        let mut c = AutoTypeFixConfig {
+            observation_timeout_secs: 0,
+            ..Default::default()
+        };
+        c.clamp_ranges();
+        assert_eq!(
+            c.observation_timeout_secs,
+            AUTO_TYPEFIX_OBSERVATION_TIMEOUT_MIN
+        );
+    }
+
+    #[test]
+    fn test_auto_typefix_clamp() {
+        let mut c = AutoTypeFixConfig {
+            kor_syllable_threshold: 10,
+            eng_word_min_length: 1,
+            forward_time_window_ms: 100,
+            reverse_time_window_ms: 100,
+            ..Default::default()
+        };
+        c.clamp_ranges();
+        assert_eq!(c.kor_syllable_threshold, AUTO_TYPEFIX_KOR_THRESHOLD_MAX);
+        assert_eq!(c.eng_word_min_length, AUTO_TYPEFIX_ENG_MIN_LENGTH_MIN);
+        assert_eq!(c.forward_time_window_ms, AUTO_TYPEFIX_TIME_WINDOW_MIN);
+        assert_eq!(c.reverse_time_window_ms, AUTO_TYPEFIX_TIME_WINDOW_MIN);
+
+        let mut c2 = AutoTypeFixConfig {
+            kor_syllable_threshold: 0,
+            eng_word_min_length: 99,
+            forward_time_window_ms: 99999,
+            reverse_time_window_ms: 99999,
+            ..Default::default()
+        };
+        c2.clamp_ranges();
+        assert_eq!(c2.kor_syllable_threshold, AUTO_TYPEFIX_KOR_THRESHOLD_MIN);
+        assert_eq!(c2.eng_word_min_length, AUTO_TYPEFIX_ENG_MIN_LENGTH_MAX);
+        assert_eq!(c2.forward_time_window_ms, AUTO_TYPEFIX_TIME_WINDOW_MAX);
+        assert_eq!(c2.reverse_time_window_ms, AUTO_TYPEFIX_TIME_WINDOW_MAX);
+    }
+
+    /// 구(旧) config.yaml (신규 필드 없음) 파싱 역호환성 검증.
+    #[test]
+    fn test_legacy_yaml_backcompat_autotypefix() {
+        let legacy = r#"
+engine:
+  auto_typefix:
+    enabled: true
+    time_window_ms: 3000
+    kor_syllable_threshold: 2
+    eng_word_min_length: 5
+    forward: true
+    reverse: true
+"#;
+        let mut cfg: Config = serde_yaml::from_str(legacy).expect("legacy yaml must parse");
+        // 구 필드가 forward/reverse 두 신 필드로 주입되도록 clamp_ranges 호출.
+        cfg.engine.auto_typefix.clamp_ranges();
+        // 누락 필드는 serde default로 채워져야 함.
+        assert!(cfg.engine.auto_typefix.skip_on_english_word);
+        assert!(cfg.engine.auto_typefix.skip_on_complete_syllable);
+        // 구 time_window_ms 값이 forward/reverse 양쪽에 주입되어야 함.
+        assert_eq!(cfg.engine.auto_typefix.forward_time_window_ms, 3000);
+        assert_eq!(cfg.engine.auto_typefix.reverse_time_window_ms, 3000);
+        assert!(cfg.engine.auto_typefix.time_window_ms.is_none());
+    }
+
+    /// 새 필드(forward/reverse)만 있는 yaml 파싱.
+    #[test]
+    fn test_new_yaml_separate_time_windows() {
+        let yaml = r#"
+engine:
+  auto_typefix:
+    forward_time_window_ms: 2500
+    reverse_time_window_ms: 4000
+"#;
+        let mut cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        cfg.engine.auto_typefix.clamp_ranges();
+        assert_eq!(cfg.engine.auto_typefix.forward_time_window_ms, 2500);
+        assert_eq!(cfg.engine.auto_typefix.reverse_time_window_ms, 4000);
+    }
+
+    /// 구 time_window_ms + 신 forward_time_window_ms 혼재 시 신 필드 우선.
+    #[test]
+    fn test_mixed_yaml_new_field_wins() {
+        let yaml = r#"
+engine:
+  auto_typefix:
+    time_window_ms: 1500
+    forward_time_window_ms: 3500
+"#;
+        let mut cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        cfg.engine.auto_typefix.clamp_ranges();
+        assert_eq!(cfg.engine.auto_typefix.forward_time_window_ms, 3500);
+        // reverse는 신 필드 미지정 → 기본값이었으므로 legacy 값(1500) 주입.
+        assert_eq!(cfg.engine.auto_typefix.reverse_time_window_ms, 1500);
+    }
+
+    #[test]
+    fn test_empty_yaml_full_defaults() {
+        // 완전히 빈 YAML에서도 모든 기본값이 채워져야 함.
+        let cfg: Config = serde_yaml::from_str("{}").unwrap();
+        assert!(cfg.engine.auto_typefix.skip_on_english_word);
+        assert!(cfg.engine.auto_typefix.skip_on_complete_syllable);
+    }
+
+    /// 제거된 필드(auto_switch, manual_shortcuts)가 포함된 구 yaml도
+    /// 파싱 실패 없이 무시되어야 한다 (serde_yaml 기본 동작: unknown field ignore).
+    #[test]
+    fn test_legacy_yaml_removed_fields_ignored() {
+        let yaml = "engine:\n  auto_switch:\n    enabled: true\n    threshold: 0.7\n  manual_shortcuts:\n    forward: ['<Super>k']\n    reverse: ['<Shift><Super>k']\n";
+        let _: crate::config::Config =
+            serde_yaml::from_str(yaml).expect("legacy yaml must still parse");
+    }
+
+    // === AutoEnglish 설정 테스트 ===
+
+    #[test]
+    fn test_auto_english_defaults() {
+        let c = AutoEnglishConfig::default();
+        assert!(!c.enabled, "기본은 비활성 (opt-in)");
+        assert_eq!(
+            c.trigger_keys,
+            vec!["key:Escape", "char:/"],
+            "기본 트리거 키는 key:Escape / char:/ (비-QWERTY 한국어 안전)"
+        );
+    }
+
+    #[test]
+    fn test_auto_english_serde_roundtrip() {
+        let mut cfg = Config::default();
+        cfg.engine.auto_english.enabled = true;
+        cfg.engine.auto_english.trigger_keys = vec!["Escape".into(), "Period".into()];
+
+        let yaml = serde_yaml::to_string(&cfg).unwrap();
+        let loaded: Config = serde_yaml::from_str(&yaml).unwrap();
+        assert!(loaded.engine.auto_english.enabled);
+        assert_eq!(
+            loaded.engine.auto_english.trigger_keys,
+            vec!["Escape", "Period"]
+        );
+    }
+
+    /// 구 YAML에 `auto_english` 섹션이 없어도 기본값으로 채워져야 한다.
+    #[test]
+    fn test_auto_english_serde_backcompat() {
+        let legacy = r#"
+engine:
+  auto_typefix:
+    enabled: true
+"#;
+        let cfg: Config = serde_yaml::from_str(legacy).expect("legacy yaml must parse");
+        assert!(!cfg.engine.auto_english.enabled);
+        assert_eq!(
+            cfg.engine.auto_english.trigger_keys,
+            vec!["key:Escape", "char:/"]
+        );
+    }
+
+    // === ConfigError Display 테스트 ===
+
+    #[test]
+    fn test_config_error_display() {
+        let e = ConfigError::IoError("test".to_string());
+        assert!(e.to_string().contains("test"));
+
+        let e = ConfigError::ParseError("bad".to_string());
+        assert!(e.to_string().contains("bad"));
+
+        let e = ConfigError::SerializeError("err".to_string());
+        assert!(e.to_string().contains("err"));
+    }
+}

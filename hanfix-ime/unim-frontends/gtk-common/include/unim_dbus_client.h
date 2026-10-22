@@ -1,0 +1,558 @@
+/**
+ * UNIM DBus Client for GTK IM Modules
+ *
+ * GDBus를 사용하여 unim-daemon과 통신하는 클라이언트 헬퍼입니다.
+ * GTK3/GTK4 IM 모듈에서 공통으로 사용됩니다.
+ */
+
+#ifndef UNIM_DBUS_CLIENT_H
+#define UNIM_DBUS_CLIENT_H
+
+#include <glib.h>
+#include <gio/gio.h>
+
+G_BEGIN_DECLS
+
+/* DBus 서비스 정보 */
+#define UNIM_DBUS_SERVICE       "org.atit.unim.InputMethod"
+#define UNIM_DBUS_PATH          "/org/atit/unim/InputMethod"
+#define UNIM_DBUS_INTERFACE     "org.atit.unim.InputMethod"
+#define UNIM_DBUS_IC_INTERFACE  "org.atit.unim.InputContext"
+
+/* 타임아웃 (밀리초) */
+#define UNIM_DBUS_TIMEOUT_MS    500
+
+/**
+ * DBus 클라이언트 컨텍스트
+ */
+typedef struct _UnimDbusContext UnimDbusContext;
+
+/**
+ * 키 처리 결과
+ */
+typedef struct {
+    gboolean consumed;            /* 키가 소비되었는지 */
+    gchar *preedit;               /* preedit 문자열 (NULL 또는 빈 문자열이면 없음) */
+    gchar *commit;                /* commit 문자열 (NULL 또는 빈 문자열이면 없음) */
+} UnimDbusKeyResult;
+
+/**
+ * 새 DBus 컨텍스트 생성
+ * 
+ * @param client_name 클라이언트 이름 (예: "gtk4-unim")
+ * @param window_id 창 식별자 (XID 또는 고유 문자열, NULL이면 client_name 사용)
+ * @return 새 컨텍스트 또는 실패 시 NULL
+ */
+UnimDbusContext* unim_dbus_context_new(const gchar *client_name, const gchar *window_id);
+
+/**
+ * DBus 컨텍스트 해제
+ * 
+ * @param ctx 해제할 컨텍스트
+ */
+void unim_dbus_context_free(UnimDbusContext *ctx);
+
+/**
+ * 키 이벤트 처리
+ * 
+ * @param ctx 컨텍스트
+ * @param keyval GDK keyval (사용되지 않음, 향후 호환성용)
+ * @param keycode 키코드 (evdev 형식)
+ * @param state 수정자 상태 비트필드
+ * @param result 결과를 저장할 포인터 (호출자가 preedit/commit을 g_free해야 함)
+ * @return 성공 시 TRUE
+ */
+gboolean unim_dbus_process_key(UnimDbusContext *ctx,
+                                guint keyval,
+                                guint keycode,
+                                guint state,
+                                UnimDbusKeyResult *result);
+
+/**
+ * 포커스 획득 알림
+ * 
+ * @param ctx 컨텍스트
+ * @param window_id 창 식별자 (NULL이면 빈 문자열 전달)
+ */
+void unim_dbus_focus_in(UnimDbusContext *ctx, const gchar *window_id);
+
+/**
+ * 포커스 상실 알림
+ * 조합 중인 문자가 있으면 커밋 문자열을 반환합니다.
+ * 
+ * @param ctx 컨텍스트
+ * @param commit 커밋 문자열을 저장할 포인터 (호출자가 g_free해야 함)
+ */
+void unim_dbus_focus_out(UnimDbusContext *ctx, gchar **commit);
+
+/**
+ * 입력 상태 초기화
+ * 조합 중인 문자가 있으면 커밋 문자열을 반환합니다.
+ * 
+ * @param ctx 컨텍스트
+ * @param commit 커밋 문자열을 저장할 포인터 (호출자가 g_free해야 함)
+ */
+void unim_dbus_reset(UnimDbusContext *ctx, gchar **commit);
+
+/**
+ * 현재 preedit 문자열 가져오기
+ * 
+ * @param ctx 컨텍스트
+ * @return preedit 문자열 (호출자가 g_free해야 함)
+ */
+gchar* unim_dbus_get_preedit(UnimDbusContext *ctx);
+
+/**
+ * 조합 중인지 확인
+ * 
+ * @param ctx 컨텍스트
+ * @return 조합 중이면 TRUE
+ */
+gboolean unim_dbus_is_composing(UnimDbusContext *ctx);
+
+/**
+ * 커서 위치 보고 (팝업 포지셔닝용)
+ * 
+ * @param ctx 컨텍스트
+ * @param x 커서 X 좌표
+ * @param y 커서 Y 좌표
+ * @param width 커서 너비
+ * @param height 커서 높이
+ */
+void unim_dbus_report_cursor_rect(UnimDbusContext *ctx,
+                                   gint x, gint y,
+                                   gint width, gint height);
+
+/**
+ * 입력 필드 목적 설정 (비밀번호/PIN 감지용)
+ *
+ * @param ctx 컨텍스트
+ * @param purpose 목적 (0=Normal, 1=Password, 2=Pin, 3=Email, 4=Number, 5=Url, 6=Terminal)
+ */
+void unim_dbus_set_content_type(UnimDbusContext *ctx, guint purpose);
+
+/**
+ * Surrounding text 설정 (커서 주변 텍스트 전달)
+ *
+ * @param ctx 컨텍스트
+ * @param text 텍스트
+ * @param cursor_pos 커서 위치 (문자 단위)
+ * @param anchor_pos 앵커 위치 (문자 단위)
+ */
+void unim_dbus_set_surrounding_text(UnimDbusContext *ctx,
+                                     const gchar *text,
+                                     guint cursor_pos,
+                                     guint anchor_pos);
+
+/* =========================================
+ * 한자 변환 관련 함수
+ * ========================================= */
+
+/**
+ * 한자 후보 항목
+ */
+typedef struct {
+    gchar *hanja;    /* 한자 문자열 */
+    gchar *meaning;  /* 뜻풀이 */
+} UnimHanjaCandidate;
+
+/**
+ * 한자 후보 목록 조회
+ * 
+ * @param ctx 컨텍스트
+ * @param target 변환 대상 문자열을 저장할 포인터 (호출자가 g_free해야 함)
+ * @param candidates 후보 배열을 저장할 포인터 (호출자가 unim_hanja_candidates_free해야 함)
+ * @param count 후보 개수를 저장할 포인터
+ * @return 성공 시 TRUE
+ */
+gboolean unim_dbus_get_hanja_candidates(UnimDbusContext *ctx,
+                                         gchar **target,
+                                         UnimHanjaCandidate **candidates,
+                                         gsize *count);
+
+/**
+ * 한자 선택
+ * 
+ * @param ctx 컨텍스트
+ * @param index 선택할 한자의 인덱스 (0부터 시작)
+ * @param selected_hanja 선택된 한자를 저장할 포인터 (호출자가 g_free해야 함)
+ * @return 성공 시 TRUE
+ */
+gboolean unim_dbus_select_hanja(UnimDbusContext *ctx,
+                                 guint index,
+                                 gchar **selected_hanja);
+
+/**
+ * 한자 모드 취소
+ *
+ * @param ctx 컨텍스트
+ * @return 커밋할 트리거 문자 (호출자가 g_free해야 함, 없으면 NULL)
+ */
+gchar *unim_dbus_cancel_hanja(UnimDbusContext *ctx);
+
+/**
+ * 한자 후보 배열 해제
+ *
+ * @param candidates 후보 배열
+ * @param count 후보 개수
+ */
+void unim_hanja_candidates_free(UnimHanjaCandidate *candidates, gsize count);
+
+/**
+ * 현재 한자 후보의 즐겨찾기 상태 조회
+ *
+ * @param ctx 컨텍스트
+ * @param states 상태 배열을 저장할 포인터 (호출자가 g_free해야 함)
+ * @param count 상태 배열 길이를 저장할 포인터
+ * @return 성공 시 TRUE
+ */
+gboolean unim_dbus_get_hanja_bookmark_states(UnimDbusContext *ctx,
+                                              gboolean **states,
+                                              gsize *count);
+
+/**
+ * 한자 즐겨찾기 토글 (엔진이 persist + 시그널 발행)
+ *
+ * @param ctx 컨텍스트
+ * @param index 토글할 후보 인덱스
+ * @return 성공 시 TRUE
+ */
+gboolean unim_dbus_toggle_hanja_bookmark(UnimDbusContext *ctx, guint index);
+
+/**
+ * 팝업 페이지 이동 (마우스 ◀/▶ 버튼 클릭용).
+ *
+ * @param ctx 컨텍스트
+ * @param direction 0 (or negative) = 이전 페이지, 1 (or positive) = 다음 페이지
+ * @return 호출 성공 여부 (실제 페이지 변경은 PopupNavigate 시그널로 통지됨)
+ *
+ * 한자/특수문자/이모지 모든 popup 종류에 동작. popup 이 활성 아니거나
+ * 단일 페이지면 데몬에서 no-op. 페이지 변경 시 PopupNavigate 시그널이
+ * 발행돼 구독자가 일괄 갱신된다 (cursor sel_row/sel_col 보존).
+ */
+gboolean unim_dbus_popup_change_page(UnimDbusContext *ctx, gint direction);
+
+/**
+ * HanjaBookmarkChanged 시그널 콜백 타입
+ *
+ * @param index 변경된 후보의 전체 인덱스
+ * @param bookmarked 토글 후 상태
+ * @param user_data 사용자 데이터
+ */
+typedef void (*UnimHanjaBookmarkChangedCallback)(guint index,
+                                                  gboolean bookmarked,
+                                                  gpointer user_data);
+
+/**
+ * HanjaBookmarkChanged 시그널 구독 및 콜백 설정
+ */
+void unim_dbus_set_hanja_bookmark_callback(UnimDbusContext *ctx,
+                                            UnimHanjaBookmarkChangedCallback callback,
+                                            gpointer user_data);
+
+/**
+ * HanjaCandidatesReordered 시그널 콜백 타입.
+ *
+ * candidates_owned: 핸들러가 g_new0으로 새로 할당한 UnimHanjaCandidate 배열을
+ * 콜백에 인계한다. 콜백(보통 im 모듈)은 기존 candidates를
+ * unim_hanja_candidates_free()로 해제하고 새 포인터를 보관해야 한다.
+ */
+typedef void (*UnimHanjaCandidatesReorderedCallback)(
+    const gchar *target,
+    UnimHanjaCandidate *candidates_owned,
+    gsize count,
+    const gboolean *bookmarks,
+    gsize bookmarks_count,
+    guint new_cursor,
+    gint page,
+    gint sel_row,
+    gint sel_col,
+    gboolean bookmarked,
+    gboolean was_bookmarked,
+    gpointer user_data
+);
+
+/**
+ * HanjaCandidatesReordered 시그널 구독 및 콜백 설정
+ */
+void unim_dbus_set_hanja_candidates_reordered_callback(
+    UnimDbusContext *ctx,
+    UnimHanjaCandidatesReorderedCallback callback,
+    gpointer user_data
+);
+
+/* =========================================
+ * 이모지 팝업 시그널 (PR #4 emoji overhaul)
+ * ========================================= */
+
+/**
+ * 이모지 카테고리 메타 (id, name_ko, name_en, count) — `ShowEmojiPopupV2`
+ * payload 의 `categories: a(sssu)` 와 1:1.
+ */
+typedef struct {
+    gchar *id;
+    gchar *name_ko;
+    gchar *name_en;
+    guint count;
+} UnimEmojiCategoryMeta;
+
+/**
+ * `ShowEmojiPopupV2` 시그널 콜백 타입.
+ *
+ * 시그니처: `(s, as, s, as, a(sssu), i, i, i, i)`
+ *   target_cat_id, items[], top_row, recent[], categories[], cursor_x, cursor_y, cursor_width, cursor_height.
+ *
+ * 핸들러는 콜백 호출 후 모든 owned 메모리를 해제한다 — 콜백은 필요한 경우
+ * 자체 깊은 복사를 수행해야 한다.
+ *
+ * @param target_cat_id 시작 카테고리 id (예: "Recent" / "SmileysPeople" / ... / "Flags")
+ * @param items 시작 카테고리 emoji 풀 (UTF-8 문자열 배열)
+ * @param item_count items 길이
+ * @param top_row 활성 영문 키맵 상단 9 문자
+ * @param recent 'Recent' 캐시 (UTF-8 배열)
+ * @param recent_count recent 길이
+ * @param categories 좌측 9 탭 메타 (정확히 9개)
+ * @param category_count categories 길이
+ * @param cursor_x 커서 X 좌표 (화면 절대)
+ * @param cursor_y 커서 Y 좌표
+ * @param cursor_width 커서 너비
+ * @param cursor_height 커서 높이
+ * @param user_data 사용자 데이터
+ */
+typedef void (*UnimShowEmojiPopupCallback)(
+    const gchar *target_cat_id,
+    const gchar * const *items,
+    gsize item_count,
+    const gchar *top_row,
+    const gchar * const *recent,
+    gsize recent_count,
+    const UnimEmojiCategoryMeta *categories,
+    gsize category_count,
+    gint cursor_x,
+    gint cursor_y,
+    gint cursor_width,
+    gint cursor_height,
+    gpointer user_data
+);
+
+/**
+ * `ShowEmojiPopupV2` 시그널 구독 및 콜백 설정.
+ *
+ * 본 시그널은 InputMethod 글로벌 시그널이 아니라 InputContext 시그널
+ * (`org.atit.unim.InputContext`) 에 발행된다 — `unim_dbus_context_new()` 가
+ * 만든 `context_path` 에 한정해 구독한다.
+ */
+void unim_dbus_set_show_emoji_popup_callback(UnimDbusContext *ctx,
+                                              UnimShowEmojiPopupCallback callback,
+                                              gpointer user_data);
+
+/**
+ * `PopupNavigate` 시그널 콜백 타입.
+ *
+ * 시그니처: `(i, i, i, i, i, i, i)`
+ *   page, total_pages, selected, rows, cols, sel_row, sel_col.
+ *
+ * 한자/특수문자/이모지 팝업이 모두 같은 시그널을 수신 — 어느 팝업이 떠 있는지
+ * 는 IM 모듈 측에서 자체 분기한다.
+ */
+typedef void (*UnimPopupNavigateCallback)(gint page,
+                                           gint total_pages,
+                                           gint selected,
+                                           gint rows,
+                                           gint cols,
+                                           gint sel_row,
+                                           gint sel_col,
+                                           gpointer user_data);
+
+/**
+ * `PopupNavigate` 시그널 구독 및 콜백 설정.
+ */
+void unim_dbus_set_popup_navigate_callback(UnimDbusContext *ctx,
+                                            UnimPopupNavigateCallback callback,
+                                            gpointer user_data);
+
+/**
+ * `HidePopup` 시그널 콜백 타입.
+ *
+ * 한자/특수문자/이모지 모두 같은 시그널로 숨김 — IM 모듈은 떠 있는 팝업 모두를
+ * 숨겨야 한다.
+ */
+typedef void (*UnimHidePopupCallback)(gpointer user_data);
+
+/**
+ * `HidePopup` 시그널 구독 및 콜백 설정.
+ */
+void unim_dbus_set_hide_popup_callback(UnimDbusContext *ctx,
+                                        UnimHidePopupCallback callback,
+                                        gpointer user_data);
+
+/**
+ * `CommitEmoji(s)` RPC — 셀 클릭/Enter 시 emoji 를 커밋.
+ *
+ * 엔진이 popup_state 갱신 + Recent MRU 업데이트 + HidePopup 시그널 발행한다.
+ *
+ * @param ctx 컨텍스트
+ * @param emoji 커밋할 이모지 문자열
+ * @return 성공 시 TRUE
+ */
+gboolean unim_dbus_commit_emoji(UnimDbusContext *ctx, const gchar *emoji);
+
+/* =========================================
+ * 특수문자 변환 관련 함수
+ * ========================================= */
+
+/**
+ * 특수문자 후보 목록 조회
+ * 
+ * @param ctx 컨텍스트
+ * @param target 변환 대상 초성을 저장할 포인터 (호출자가 g_free해야 함)
+ * @param characters 특수문자 배열을 저장할 포인터 (호출자가 unim_special_chars_free해야 함)
+ * @param count 문자 개수를 저장할 포인터
+ * @return 성공 시 TRUE
+ */
+gboolean unim_dbus_get_special_char_candidates(UnimDbusContext *ctx,
+                                                gchar **target,
+                                                gchar ***characters,
+                                                gsize *count,
+                                                gchar **top_row);
+
+/**
+ * 특수문자 선택
+ * 
+ * @param ctx 컨텍스트
+ * @param index 선택할 특수문자의 인덱스 (0부터 시작)
+ * @param selected_char 선택된 특수문자를 저장할 포인터 (호출자가 g_free해야 함)
+ * @return 성공 시 TRUE
+ */
+gboolean unim_dbus_select_special_char(UnimDbusContext *ctx,
+                                        guint index,
+                                        gchar **selected_char);
+
+/**
+ * 특수문자 모드 취소
+ *
+ * @param ctx 컨텍스트
+ * @return 커밋할 트리거 문자 (호출자가 g_free해야 함, 없으면 NULL)
+ */
+gchar *unim_dbus_cancel_special_char(UnimDbusContext *ctx);
+
+/**
+ * 특수문자 배열 해제
+ * 
+ * @param characters 문자 배열
+ * @param count 문자 개수
+ */
+void unim_special_chars_free(gchar **characters, gsize count);
+
+/* =========================================
+ * AutoTypeFix 콜백
+ * ========================================= */
+
+/**
+ * AutoTypeFix 콜백 타입
+ * @param delete_chars 삭제할 글자 수
+ * @param commit_text commit할 텍스트
+ * @param preedit_text preedit으로 설정할 텍스트 (빈 문자열이면 없음)
+ * @param user_data 사용자 데이터
+ */
+typedef void (*UnimAutoTypeFixCallback)(guint delete_chars,
+                                         const gchar *commit_text,
+                                         const gchar *preedit_text,
+                                         gpointer user_data);
+
+/**
+ * AutoTypeFix 시그널 구독 및 콜백 설정
+ *
+ * @param ctx 컨텍스트
+ * @param callback AutoTypeFix 콜백 함수
+ * @param user_data 콜백에 전달할 사용자 데이터
+ */
+void unim_dbus_set_auto_typefix_callback(UnimDbusContext *ctx,
+                                          UnimAutoTypeFixCallback callback,
+                                          gpointer user_data);
+
+/**
+ * CommitText 시그널 콜백 타입
+ * Standalone 팝업에서 마우스 클릭으로 한자/특수문자 선택 시 호출됨
+ *
+ * @param text 커밋할 텍스트
+ * @param user_data 사용자 데이터
+ */
+typedef void (*UnimCommitTextCallback)(const gchar *text,
+                                       gpointer user_data);
+
+/**
+ * CommitText 시그널 구독 및 콜백 설정
+ *
+ * @param ctx 컨텍스트
+ * @param callback CommitText 콜백 함수
+ * @param user_data 콜백에 전달할 사용자 데이터
+ */
+void unim_dbus_set_commit_text_callback(UnimDbusContext *ctx,
+                                         UnimCommitTextCallback callback,
+                                         gpointer user_data);
+
+/**
+ * preedit 캐시를 외부에서 설정 (AutoTypeFix용)
+ * @param ctx 컨텍스트
+ * @param preedit 새 preedit 텍스트
+ */
+void unim_dbus_set_preedit_cache(UnimDbusContext *ctx, const gchar *preedit);
+
+/* =========================================
+ * 설정 조회 관련 함수
+ * ========================================= */
+
+/**
+ * 설정 값 조회
+ *
+ * @param ctx 컨텍스트
+ * @param key 설정 키 (예: "toggle_keys", "hanja_keys")
+ * @return 설정 값 문자열 (호출자가 g_free해야 함), 실패 시 NULL
+ */
+gchar* unim_dbus_get_config(UnimDbusContext *ctx, const gchar *key);
+
+/**
+ * KeyCode 이름에서 GDK keyval로 변환
+ *
+ * @param name KeyCode 이름 (예: "Hanja", "F9")
+ * @return GDK keyval, 알 수 없으면 0
+ */
+guint unim_keycode_name_to_gdk_keyval(const gchar *name);
+
+/* 핫키 수정자 비트 — 엔진 `from_x11_mask` 비트 정렬과 동일하게 맞춘다.
+ * (immodule 의 DBus mod_state 변환과 같은 레이아웃이라 상호 비교가 가능하다) */
+#define UNIM_HOTKEY_MOD_SHIFT (1u << 0)
+#define UNIM_HOTKEY_MOD_CTRL  (1u << 2)
+#define UNIM_HOTKEY_MOD_ALT   (1u << 3)
+#define UNIM_HOTKEY_MOD_SUPER (1u << 6)
+
+/** 핫키 판정에 쓰는 수정자 비트 전체. CapsLock/NumLock 등 Lock 류는 제외한다 */
+#define UNIM_HOTKEY_MOD_MASK                                       \
+    (UNIM_HOTKEY_MOD_SHIFT | UNIM_HOTKEY_MOD_CTRL |                \
+     UNIM_HOTKEY_MOD_ALT | UNIM_HOTKEY_MOD_SUPER)
+
+/**
+ * 핫키 표기 문자열을 keyval + 요구 수정자 마스크로 파싱
+ *
+ * 문법은 엔진(src/input_engine)의 ATF 토글 핫키 문법 `[수정자+]*KeyName` 과
+ * 맞춘다. 수정자는 Ctrl/Control, Alt, Super/Win/Meta, Shift 이며 대소문자·순서
+ * 무관, 중복은 멱등. 마지막 토큰이 KeyName 으로
+ * unim_keycode_name_to_gdk_keyval() 로 변환된다 (예: "Shift+F9", "F9").
+ *
+ * 판정은 **정확-일치**다 — 여기서 지정하지 않은 수정자가 눌리면 불일치로 봐야
+ * 한다. 호출자는 UNIM_HOTKEY_MOD_MASK 로 마스킹한 현재 수정자 비트와
+ * *out_mods 를 == 비교하라.
+ *
+ * @param spec     핫키 표기 (예: "Shift+F9"). 앞뒤 공백 허용
+ * @param out_keyval 파싱된 GDK keyval 출력 (필수)
+ * @param out_mods   요구 수정자 비트(UNIM_HOTKEY_MOD_*) 출력 (필수)
+ * @return 성공 시 TRUE. 미지 수정자·미지/빈 KeyName 이면 FALSE (출력 미변경)
+ */
+gboolean unim_parse_hotkey_spec(const gchar *spec,
+                                guint *out_keyval,
+                                guint *out_mods);
+
+G_END_DECLS
+
+#endif /* UNIM_DBUS_CLIENT_H */

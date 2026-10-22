@@ -1,0 +1,202 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: unim\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-27 09:20+0900\n"
+"PO-Revision-Date: 2026-07-27 09:20+0900\n"
+"Last-Translator: \n"
+"Language-Team: \n"
+"Language: en\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: extension.js:652
+msgid "UNIM TypeFIX"
+msgstr "UNIM TypeFIX"
+
+#: extension.js:652
+#, javascript-format
+msgid "Conversion complete: %s"
+msgstr "Conversion complete: %s"
+
+#: extension.js:707 extension.js:718
+msgid "UNIM Dictionary"
+msgstr "UNIM Dictionary"
+
+#: extension.js:708
+msgid "Selection is empty, invalid, or already registered."
+msgstr "Selection is empty, invalid, or already registered."
+
+#: extension.js:719
+#, javascript-format
+msgid "Registered '%s' to the reverse user dictionary."
+msgstr "Registered '%s' to the reverse user dictionary."
+
+#: prefs.js:21
+msgid "UNIM"
+msgstr "UNIM"
+
+#: prefs.js:30
+msgid "일반 설정"
+msgstr "General Settings"
+
+#: prefs.js:31
+msgid ""
+"자판·입력 모드·오타 교정 등 일반 설정은 UNIM 설정 앱(unim-settings)에서 관리"
+"합니다."
+msgstr ""
+"Layouts, input mode, auto TypeFix and other general settings are managed "
+"in the UNIM Settings app (unim-settings)."
+
+#: prefs.js:36
+msgid "UNIM 설정 앱 열기"
+msgstr "Open UNIM Settings App"
+
+#: prefs.js:37
+msgid "자판, 모드, 단축키, 자동 교정 등 모든 일반 설정"
+msgstr "All general settings: layouts, modes, shortcuts, auto correction"
+
+#: prefs.js:53
+msgid "UNIM 설정 앱 실행 실패. 터미널에서 `unim-settings`를 직접 실행하세요."
+msgstr ""
+"Failed to launch UNIM Settings app. Run `unim-settings` manually in a "
+"terminal."
+
+#: prefs.js:70
+msgid "표시"
+msgstr "Display"
+
+#: prefs.js:76
+msgid "왼쪽 클릭 = 한/영 전환"
+msgstr "Left click = Toggle Korean/English"
+
+#: prefs.js:77
+msgid "왼쪽 클릭 = 메뉴 (GNOME 기본)"
+msgstr "Left click = Menu (GNOME default)"
+
+#: prefs.js:79
+msgid "패널 클릭 동작"
+msgstr "Panel Click Behavior"
+
+#: prefs.js:80
+msgid "오른쪽 클릭은 항상 메뉴를 표시합니다."
+msgstr "Right click always shows the menu."
+
+#: prefs.js:92
+msgid "변환 알림 표시"
+msgstr "Show Conversion Notification"
+
+#: prefs.js:93
+msgid "오타 교정 시 알림 메시지 표시"
+msgstr "Show notification when typo is corrected"
+
+#: prefs.js:99
+msgid "실시간 입력기"
+msgstr "Realtime IME"
+
+#: prefs.js:100
+msgid "Wayland 세션 전용. Clutter.InputMethod로 IBus를 대체합니다."
+msgstr "Wayland session only. Replaces IBus with Clutter.InputMethod."
+
+#: prefs.js:105
+msgid "IME 모드 활성화"
+msgstr "Enable IME Mode"
+
+#: prefs.js:106
+msgid "Wayland 세션에서 한글 실시간 입력"
+msgstr "Realtime Korean input on Wayland sessions"
+
+#: prefs.js:111
+msgid "Wayland 세션에서만 사용 가능합니다."
+msgstr "Available only on Wayland sessions."
+
+#: prefs.js:118
+msgid "변환 단축키"
+msgstr "Conversion Shortcuts"
+
+#: prefs.js:119
+msgid "포커스된 단어를 순/역방향으로 변환 후 교체"
+msgstr "Convert and replace the focused word forward/backward"
+
+#: prefs.js:124
+msgid "영어 → 한글"
+msgstr "English -> Korean"
+
+#: prefs.js:124
+msgid "gksrmf → 한글"
+msgstr "gksrmf -> 한글"
+
+#: prefs.js:126
+msgid "한글 → 영어"
+msgstr "Korean -> English"
+
+#: prefs.js:126
+msgid "ㅗ디ㅣㅐ → hello"
+msgstr "ㅗ디ㅣㅐ -> hello"
+
+#: prefs.js:132
+msgid "사용자 사전 등록"
+msgstr "User Dictionary Registration"
+
+#: prefs.js:133
+msgid "선택한 한글을 영문으로 변환해 역방향 교정 사용자 사전에 추가합니다."
+msgstr ""
+"Convert selected Korean text to English and add to the reverse correction "
+"user dictionary."
+
+#: prefs.js:138
+msgid "선택 영역 등록"
+msgstr "Register Selection"
+
+#: prefs.js:138
+msgid "ㅎㅑㅅ → git (CLI 명령어 등)"
+msgstr "ㅎㅑㅅ -> git (CLI commands etc.)"
+
+#: prefs.js:186
+msgid "기본값 복원"
+msgstr "Restore defaults"
+
+#. === 입력 모드 선택 ===
+#: indicator.js:98
+msgid "한국어 모드 (Korean)"
+msgstr "Korean Mode"
+
+#: indicator.js:102
+msgid "영어 모드 (English)"
+msgstr "English Mode"
+
+#. === UNIM 설정 앱 (unim-settings) ===
+#: indicator.js:109
+msgid "UNIM 설정 (Settings)..."
+msgstr "UNIM Settings..."
+
+#. === GNOME 확장 설정 ===
+#: indicator.js:114
+msgid "GNOME 확장 설정 (Extension)..."
+msgstr "GNOME Extension Settings..."
+
+#. === 오프라인 사용자 매뉴얼 ===
+#: indicator.js:119
+msgid "도움말 (Help)"
+msgstr "Help"
+
+#: indicator.js:130
+msgid "⚠️ UNIM 데몬 연결 안됨"
+msgstr "⚠️ UNIM daemon not connected"
+
+#: indicator.js:132
+msgid "💤 입력 대기 중"
+msgstr "💤 Waiting for input"
+
+#: indicator.js:134
+msgid "🇰🇷 한국어 입력 중"
+msgstr "🇰🇷 Typing Korean"
+
+#: indicator.js:134
+msgid "🔤 영어 입력 중"
+msgstr "🔤 Typing English"
+
+#: indicator.js:332
+msgid "UNIM 데몬이 실행 중이지 않습니다."
+msgstr "UNIM daemon is not running."

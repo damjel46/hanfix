@@ -1,0 +1,106 @@
+{
+  "schema_version": 2,
+  "language": "korean",
+  "name": "3bul391",
+  "type": "3bul",
+  "metadata": {
+    "display_name": "세벌식 최종 (391)",
+    "author": "공병우 (1991)",
+    "description": "공병우 박사의 세벌식 최종안 (1991). 390 대비 받침과 기호 배치가 더 풍부해 옛한글·부호 입력까지 가능.",
+    "version": "1.0",
+    "tags": ["korean", "3bul", "final"]
+  },
+  "layout": {
+    "upper": {
+      "1st": ["※", "ᆩ", "ᆰ", "ᆽ", "ᆱ", "ᆶ", "=", "“", "”", "'", "~", ";", "<", "\\"],
+      "2nd": ["ᇁ", "ᇀ", "ᆬ", "ᆶ", "ᆳ", "5", "6", "7", "8", "9", "%", "/"],
+      "3rd": ["ᆮ", "ᆭ", "ᆲ", "ᆵ", "ㅒ", "0", "1", "2", "3", "4", "·"],
+      "4th": ["ᆾ", "ᆹ", "ᆿ", "ᆪ", "?", "-", "\"", ",", ".", "!"]
+    },
+    "lower": {
+      "1st": ["*", "ᇂ", "ᆻ", "ᆸ", "ㅛ", "ㅠ", "ㅑ", "ㅖ", "ㅢ", "ㅜ", "ㅋ", ")", ">", ":"],
+      "2nd": ["ᆺ", "ᆯ", "ㅕ", "ㅐ", "ㅓ", "ㄹ", "ㄷ", "ㅁ", "ㅊ", "ㅍ", "(", "<"],
+      "3rd": ["ᆼ", "ᆫ", "ㅣ", "ㅏ", "ㅡ", "ㄴ", "ㅇ", "ㄱ", "ㅈ", "ㅂ", "ㅌ"],
+      "4th": ["ᆷ", "ᆨ", "ㅔ", "ㅗ", "ㅜ", "ㅅ", "ㅎ", ",", ".", "ㅗ"]
+    }
+  },
+  "combinations": {
+    "cho": [
+      { "first": "ㄱ", "second": "ㄱ", "result": "ㄲ" },
+      { "first": "ㄷ", "second": "ㄷ", "result": "ㄸ" },
+      { "first": "ㅂ", "second": "ㅂ", "result": "ㅃ" },
+      { "first": "ㅅ", "second": "ㅅ", "result": "ㅆ" },
+      { "first": "ㅈ", "second": "ㅈ", "result": "ㅉ" }
+    ],
+    "jung": [
+      { "first": "ㅗ", "second": "ㅏ", "result": "ㅘ" },
+      { "first": "ㅗ", "second": "ㅐ", "result": "ㅙ" },
+      { "first": "ㅗ", "second": "ㅣ", "result": "ㅚ" },
+      { "first": "ㅜ", "second": "ㅓ", "result": "ㅝ" },
+      { "first": "ㅜ", "second": "ㅔ", "result": "ㅞ" },
+      { "first": "ㅜ", "second": "ㅣ", "result": "ㅟ" },
+      { "first": "ㅡ", "second": "ㅣ", "result": "ㅢ" }
+    ],
+    "jong": [
+      { "first": "ᆨ", "second": "ᆨ", "result": "ᆩ" },
+      { "first": "ᆨ", "second": "ᆺ", "result": "ᆪ" },
+      { "first": "ᆫ", "second": "ᆽ", "result": "ᆬ" },
+      { "first": "ᆫ", "second": "ᇂ", "result": "ᆭ" },
+      { "first": "ᆯ", "second": "ᆨ", "result": "ᆰ" },
+      { "first": "ᆯ", "second": "ᆷ", "result": "ᆱ" },
+      { "first": "ᆯ", "second": "ᆸ", "result": "ᆲ" },
+      { "first": "ᆯ", "second": "ᆺ", "result": "ᆳ" },
+      { "first": "ᆯ", "second": "ᇀ", "result": "ᆴ" },
+      { "first": "ᆯ", "second": "ᇁ", "result": "ᆵ" },
+      { "first": "ᆯ", "second": "ᇂ", "result": "ᆶ" },
+      { "first": "ᆸ", "second": "ᆺ", "result": "ᆹ" },
+      { "first": "ᆺ", "second": "ᆺ", "result": "ᆻ" }
+    ]
+  },
+  "rule_sets": {
+    "sun_arae_batchim": {
+      "active": false,
+      "description": "받침을 8개(ㄱㄴㄹㅁㅂㅅㅇㅎ)만 쓰는 단순화된 자판을 함께 쓸 때 켭니다. ㄴ+ㄴ→ㄷ, ㄱ+ㅎ→ㅋ처럼 두 키 조합으로 겹받침과 거센소리 받침을 만듭니다. 391은 받침이 풍부하게 직접 배치되어 있어 기본은 꺼져 있지만, 단순 자판 호환이 필요할 때 켤 수 있습니다.",
+      "combinations": [
+        { "first": "ᆫ", "second": "ᆫ", "result": "ᆮ" },
+        { "first": "ᆫ", "second": "ᆺ", "result": "ᆽ" },
+        { "first": "ᆨ", "second": "ᇂ", "result": "ᆿ" },
+        { "first": "ᆸ", "second": "ᇂ", "result": "ᇁ" },
+        { "first": "ᆮ", "second": "ᇂ", "result": "ᇀ" },
+        { "first": "ᆽ", "second": "ᇂ", "result": "ᆾ" },
+        { "first": "ᆭ", "second": "ᆺ", "result": "ᆬ" },
+        { "first": "ᆶ", "second": "ᆫ", "result": "ᆴ" },
+        { "first": "ᆶ", "second": "ᆸ", "result": "ᆵ" }
+      ]
+    },
+    "sun_arae_moeum": {
+      "active": false,
+      "description": "Shift 없이 ㅒ를 입력하고 싶을 때 켭니다. ㅑ+ㅣ→ㅒ, ㅕ+ㅣ→ㅖ처럼 두 모음을 이어 만듭니다. 391은 ㅖ가 lower에 직접 있고 ㅒ는 Shift 위치라, ㅒ를 자주 쓰는 사용자에게 도움이 됩니다.",
+      "combinations": [
+        { "first": "ㅑ", "second": "ㅣ", "result": "ㅒ" },
+        { "first": "ㅕ", "second": "ㅣ", "result": "ㅖ" }
+      ]
+    },
+    "vowel_strict": {
+      "active": true,
+      "description": "ㅗ·ㅜ가 위치한 키마다 이중모음 결합 가부를 따로 둡니다. /·9 키의 ㅗ·ㅜ는 후속 ㅏ/ㅐ/ㅣ/ㅓ/ㅔ와 합쳐 ㅘ/ㅙ/ㅚ/ㅝ/ㅞ/ㅟ로 결합되지만, v·b 키의 ㅗ·ㅜ는 단순 모음만 — 후속 모음이 와도 새 음절로 분리됩니다. 끄면 모든 ㅗ·ㅜ가 합쳐질 수 있어 v·b 키에서도 합용 가능.",
+      "key_meta": {
+        "v": { "vowel_combine_head": false },
+        "b": { "vowel_combine_head": false }
+      }
+    },
+    "slash_context_alt": {
+      "active": true,
+      "description": "/ 키를 컨텍스트에 따라 분기합니다. preedit이 초성 한 개만 들어 있을 때는 ㅗ로 동작해 ㅘ/ㅙ/ㅚ 합용을 가능하게 하고, 그 외(빈 preedit·중성·종성 채워짐·영어 모드)에서는 리터럴 / 로 출력됩니다. 끄면 / 키가 어떤 상황에서도 항상 ㅗ로 동작합니다.",
+      "key_meta": {
+        "/": {
+          "context_alt": {
+            "when": "choseong_only",
+            "to": "ㅗ",
+            "fallback": "/"
+          }
+        }
+      }
+    }
+  }
+}

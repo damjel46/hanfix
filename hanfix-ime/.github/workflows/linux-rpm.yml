@@ -1,0 +1,211 @@
+name: Linux rpm Release
+
+# 릴리스는 태그에서만 — linux-deb.yml 과 동일 정책.
+#  - v* 태그 push → 같은 태그의 릴리스에 .rpm 자산 append (softprops upsert)
+#  - workflow_dispatch(tag 입력) → 해당 태그로 릴리스
+#  - workflow_dispatch(tag 미입력) → 빌드/검증 리허설만 (릴리스 미생성)
+#
+# 배포판 매트릭스: fedora(지원 중 릴리스) + el10(RHEL 10 계열 — Rocky·Alma).
+# el10 은 glibc 2.39 로 Ubuntu 24.04 와 같은 기준선이라, EOL 된 Fedora
+# 40~42 사용자층의 "24.04 수준" 요구를 실질 대체한다. Fedora 새 릴리스가
+# 나오면 매트릭스에 추가하고 EOL 레그를 내린다 — scripts/build-linux-matrix.sh
+# 의 표와 publish 팬인 검증 수도 함께.
+# 빌드·게이트 로직은 scripts/ci/ 에 있다 (linux-deb.yml 과 같은 구조).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '릴리스할 태그 (예: v0.4.0). 비우면 현재 ref 를 빌드+검증만 하고 릴리스는 만들지 않습니다.'
+        required: false
+        type: string
+
+# 같은 ref 의 중복 실행은 취소하지 않는다 (릴리스 파이프라인은 끝까지 완주).
+concurrency:
+  group: linux-rpm-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # RUSTFLAGS: -Dwarnings 는 의도적으로 넣지 않는다 (linux-deb.yml 동일 사유).
+
+jobs:
+  build-rpm:
+    name: Build .rpm (${{ matrix.tag }})
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false   # 레그 독립 — publish-rpm 이 전 레그 성공을 요구
+      matrix:
+        include:
+          - { image: 'fedora:43',    tag: fedora43 }
+          - { image: 'fedora:44',    tag: fedora44 }
+          # el10 은 CRB(qt6 private/libadwaita devel) + EPEL(Qt5) 을 쓴다 —
+          # bootstrap-rpm.sh 가 활성화. RHEL 본체는 Qt5 를 제거했지만 EPEL 이
+          # 패키징하므로 Fedora 와 같은 11개 구성이 유지된다.
+          - { image: 'almalinux:10', tag: el10 }
+
+    steps:
+      # checkout 이 git 를 쓰므로 최소 부트스트랩이 먼저다. 나머지는
+      # 체크아웃 뒤 scripts/ci/bootstrap-rpm.sh 가 맡는다.
+      - name: Minimal bootstrap (git for checkout)
+        shell: bash
+        run: dnf -y install git-core
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Verify version sync (Cargo.toml / rpm spec / tag)
+        id: guard
+        shell: bash
+        # dispatch 입력값은 셸 보간 대신 env 간접 전달 (linux-deb.yml 동일 하드닝).
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          # 컨테이너 uid 불일치로 git 이 워크스페이스를 거부하지 않도록.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+          CARGO_VER=$(grep -E '^version *= *"' Cargo.toml | head -1 | sed -E 's/.*"([0-9.]+)".*/\1/')
+          SPEC_VER=$(grep -E '^Version:' rpm/unim.spec | head -1 | awk '{print $2}')
+
+          if [[ "$CARGO_VER" != "$SPEC_VER" ]]; then
+            echo "::error::Cargo.toml($CARGO_VER) 와 rpm/unim.spec($SPEC_VER) 버전 불일치. 두 파일을 함께 범프하세요."
+            exit 1
+          fi
+
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG="$INPUT_TAG"
+          fi
+          if [[ -n "$TAG" ]]; then
+            if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::태그 형식이 올바르지 않습니다: '$TAG' (예: v0.4.0)"
+              exit 1
+            fi
+            if [[ "${TAG#v}" != "$CARGO_VER" ]]; then
+              echo "::error::태그($TAG) 와 Cargo.toml 버전($CARGO_VER) 불일치. 같은 버전 재릴리스는 spec Release 만 올리지 말고 버전을 범프하세요."
+              exit 1
+            fi
+          fi
+          echo "version=$CARGO_VER" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Bootstrap build dependencies (scripts/ci/bootstrap-rpm.sh)
+        shell: bash
+        run: scripts/ci/bootstrap-rpm.sh ${{ matrix.tag }}
+
+      - name: Cargo cache
+        # builddep 뒤에 두어야 rustc 존재(캐시 키 계산) 조건이 충족된다.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-rpm-${{ matrix.tag }}   # 레그별 분리 (skia 등)
+          cache-targets: true
+          cache-on-failure: true
+
+      - name: Build + verify + smoke (scripts/ci/build-rpm.sh)
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.guard.outputs.release_tag }}
+        run: scripts/ci/build-rpm.sh ${{ matrix.tag }} --smoke
+
+      - name: Upload functional-test logs (실패 진단용, always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: functional-test-${{ matrix.tag }}
+          path: functional-logs/functional-${{ matrix.tag }}/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload build artifacts
+        # 릴리스 여부와 무관하게 항상 업로드 (dispatch 리허설 검증용).
+        uses: actions/upload-artifact@v4
+        with:
+          name: unim-rpm-${{ steps.guard.outputs.version }}-${{ matrix.tag }}
+          path: |
+            rpms/*.rpm
+            rpms/SHA256SUMS-${{ matrix.tag }}
+          if-no-files-found: error
+          retention-days: 30
+
+  # 자산 append 는 이 잡 하나만 한다 (매트릭스 레그의 동시 upsert 경합 차단).
+  # body / name / make_latest 는 의도적으로 미지정 — 릴리스 본문·이름의 단일
+  # 저자는 linux-deb.yml 의 publish-deb 다 (softprops 는 upsert 시 미지정
+  # 필드를 보존한다). 자산 파일명은 %{?dist}(.fc43/.el10)로 deb 와 안 겹친다.
+  publish-rpm:
+    name: Attach RPMs (fan-in)
+    runs-on: ubuntu-24.04
+    needs: build-rpm
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag != ''
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout (version read)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Read version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_VER=$(grep -E '^version *= *"' Cargo.toml | head -1 | sed -E 's/.*"([0-9.]+)".*/\1/')
+          echo "version=$CARGO_VER" >> "$GITHUB_OUTPUT"
+
+      - name: Download all distro artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: unim-rpm-${{ steps.ver.outputs.version }}-*
+          path: rpms
+          merge-multiple: true   # %{?dist} 로 파일명이 갈려 충돌 없음
+
+      - name: Verify fan-in completeness + legacy manifest alias
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -la rpms/
+          # 레그당 11개 × 3 레그 = 33. 매트릭스 변경 시 이 수도 함께 갱신.
+          count=$(ls rpms/*.rpm | wc -l)
+          if [[ "$count" -ne 33 ]]; then
+            echo "::error::팬인된 .rpm 이 33개가 아닙니다 (실제 $count) — 누락 레그 의심"
+            exit 1
+          fi
+          for t in fedora43 fedora44 el10; do
+            [[ -f "rpms/SHA256SUMS-$t" ]] || { echo "::error::SHA256SUMS-$t 누락"; exit 1; }
+          done
+          # 구버전 install.sh 보호용 별칭 (publish-deb 의 SHA256SUMS 와 동일 정책).
+          cp rpms/SHA256SUMS-fedora43 rpms/SHA256SUMS-rpm
+
+      - name: Attach RPMs to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            rpms/*.rpm
+            rpms/SHA256SUMS-fedora43
+            rpms/SHA256SUMS-fedora44
+            rpms/SHA256SUMS-el10
+            rpms/SHA256SUMS-rpm
+
+      - name: Verify release asset names match manifests
+        # 릴리스 생성 직후 대조 — 빌드·업로드가 그린이어도 "올라간 이름"이
+        # 매니페스트와 다르면 install.sh 가 404 를 맞는다 (v0.4.2 실측).
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          scripts/ci/verify-release-assets.sh "$RELEASE_TAG" \
+            rpms/SHA256SUMS-fedora43 \
+            rpms/SHA256SUMS-fedora44 \
+            rpms/SHA256SUMS-el10 \
+            rpms/SHA256SUMS-rpm
