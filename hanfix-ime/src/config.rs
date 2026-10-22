@@ -60,8 +60,8 @@ pub enum CommitUnit {
     /// 음절 단위 확정. 한 음절이 완성되면 즉시 commit.
     Syllable,
     /// 단어 단위 확정. 단어 경계까지 preedit 으로 누적.
-    /// (hanfix-ime 는 설치 시 config 에 `commit_unit: Word` 를 쓴다 — 교정을 조합 치환으로 하려면
-    /// 단어 모드가 필요하다. 코드 기본값은 UNIM 과 같게 둔다.)
+    /// (hanfix-ime 도 기본값 Smart 를 그대로 쓴다 — 모든 앱에 Word 를 켜면 카카오톡 같은 옛 방식
+    /// 입력창에서 자모가 두 번 찍힌다. 음절 모드 앱의 교정은 replace_surrounding 경로로 한다.)
     Word,
     /// 스마트 (기본) — 문맥(앱)에 따라 음절/단어 단위를 자동 선택. 현재 보수적
     /// 정책으로 MS Word(winword.exe) 등 협조 앱만 단어 단위, 그 외는 음절 단위.

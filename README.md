@@ -27,18 +27,16 @@
 
 ## 설치 (Windows 10/11)
 
-1. **UNIM 설치** (관리자 승인 1회, 코드 서명이 없어 SmartScreen 경고가 뜨면 "추가 정보 → 실행"):
-   ```powershell
-   irm https://raw.githubusercontent.com/from104/unim/main/install.ps1 | iex
-   ```
-2. 설정 → 시간 및 언어 → 언어 및 지역 → 한국어 ⋯ → 언어 옵션 → 키보드 추가 → **UNIM**
-3. [Releases](../../releases)에서 `hanfix-ime-*.zip`을 받아 압축을 풀고, **관리자 PowerShell**에서:
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File .\install.ps1
-   ```
-4. 쓰던 앱을 다시 켜고(가장 확실한 건 로그아웃/로그인) Win+Space로 UNIM 선택.
+1. [Releases](../../releases/latest)에서 `hanfix-ime-*-win.zip`을 받아 **압축을 풉니다** (zip 안에서 바로 실행하면 안 됨).
+2. 폴더 안의 **`설치.bat`을 더블클릭** → 관리자 승인 1회.
+   UNIM이 없으면 함께 든 공식 UNIM 0.4.4를 자동 설치하고, 키보드 목록에도 자동으로 추가합니다.
+   (코드 서명이 없어 SmartScreen 경고가 뜨면 "추가 정보 → 실행")
+3. 로그아웃/로그인(또는 쓰던 앱 재시작) 후 Win+Space로 UNIM 선택.
 
-되돌리기: 같은 폴더에서 `install.ps1 -Restore` (UNIM 원본으로 복귀). 완전 제거는 설정 → 앱에서 UNIM 제거.
+- 되돌리기: `UNIM원본으로되돌리기.bat` (UNIM은 그대로, 판단만 원래대로)
+- 완전 제거: `제거.bat` (hanfix-ime와 UNIM 모두)
+- UNIM이 0.4.4가 아닌 버전으로 이미 깔려 있으면 아무것도 바꾸지 않고 멈춥니다.
+- 설치기가 바꾸는 설정은 자동 학습(`rollback_detection: false`) 하나뿐입니다. 확정 단위는 UNIM 기본값 Smart 그대로.
 
 ## 알려진 한계
 
